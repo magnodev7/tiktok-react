@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Application data (não transferir para VPS)
+videos/
+posted/
+user_data/
+state/*.db
+state/*.db-*
+state/trash/
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Chrome/Selenium
+chromedriver
+*.crx
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
