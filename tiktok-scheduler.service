@@ -1,0 +1,14 @@
+[Unit]
+Description=TikTok Scheduler
+After=network.target
+
+[Service]
+WorkingDirectory=/home/magnod/Works/tiktok-react/beckend
+ExecStart=/home/magnod/Works/tiktok-react/beckend/venv/bin/python start_scheduler.py start
+ExecStop=/home/magnod/Works/tiktok-react/beckend/venv/bin/python start_scheduler.py stop
+Restart=always
+User=magnod
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

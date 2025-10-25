@@ -1,0 +1,90 @@
+import json
+import time
+from pathlib import Path
+from selenium.webdriver.remote.webdriver import WebDriver
+from typing import Optional
+
+def load_cookies_for_account(
+    driver: WebDriver,
+    account_name: str,
+    base_url: str = "https://www.tiktok.com/"
+) -> bool:
+    from .account_storage import AccountStorage
+
+    if not account_name or not account_name.strip():
+        print("❌ ERRO: account_name é obrigatório")
+        return False
+
+    print(f"🔍 Tentando carregar cookies para conta: {account_name}")
+    storage = AccountStorage()
+    cookies_data = storage.get_latest_cookies(account_name)
+
+    if not cookies_data:
+        print(f"❌ Cookies não encontrados para conta: {account_name}")
+        return False
+
+    driver.get(base_url)
+
+    cookies_list = None
+    if isinstance(cookies_data, dict) and "cookies" in cookies_data:
+        cookies_list = cookies_data["cookies"]
+    elif isinstance(cookies_data, list):
+        cookies_list = cookies_data
+    elif isinstance(cookies_data, dict):
+        cookies_list = [
+            {'name': name, 'value': str(value), 'domain': '.tiktok.com'}
+            for name, value in cookies_data.items()
+        ]
+
+    if not cookies_list:
+        print(f"❌ Formato de cookies inválido para: {account_name}")
+        return False
+
+    for cookie in cookies_list:
+        try:
+            if 'sameSite' in cookie:
+                same_site = str(cookie['sameSite']).lower()
+                if same_site in ['unspecified', 'no_restriction', 'none']:
+                    cookie['sameSite'] = 'None'
+                elif same_site == 'lax':
+                    cookie['sameSite'] = 'Lax'
+                elif same_site == 'strict':
+                    cookie['sameSite'] = 'Strict'
+                else:
+                    cookie.pop('sameSite', None)
+            if 'expiry' in cookie:
+                cookie['expires'] = cookie.pop('expiry')
+            driver.add_cookie(cookie)
+        except Exception as e:
+            print(f"⚠️ Erro ao adicionar cookie: {e}")
+
+    driver.refresh()
+    time.sleep(3)
+
+    current_url = driver.current_url.lower()
+    is_logged_in = "login" not in current_url and "tiktok.com" in current_url
+
+    if is_logged_in:
+        print(f"✅ Login bem-sucedido para conta: {account_name}")
+    else:
+        print(f"❌ Falha no login para conta: {account_name} (URL atual: {current_url})")
+
+    return is_logged_in
+
+
+def save_cookies_for_account(driver: WebDriver, account_name: str) -> Optional[Path]:
+    from .account_storage import AccountStorage
+
+    if not account_name or not account_name.strip():
+        print("❌ ERRO: account_name é obrigatório")
+        return None
+
+    try:
+        cookies = driver.get_cookies()
+        storage = AccountStorage()
+        cookies_path = storage.save_cookies(account_name, cookies)
+        print(f"✅ Cookies salvos para conta '{account_name}': {cookies_path}")
+        return cookies_path
+    except Exception as e:
+        print(f"❌ Erro ao salvar cookies para '{account_name}': {e}")
+        return None
