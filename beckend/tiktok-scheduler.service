@@ -8,23 +8,23 @@ Requires=tiktok-backend.service
 Type=simple
 User=magno
 Group=magno
-WorkingDirectory=/home/magno/Works/vps/vps_167/tiktok-react/beckend
-Environment="PATH=/home/magno/Works/vps/vps_167/tiktok-react/beckend/venv/bin:/usr/local/bin:/usr/bin:/bin"
+WorkingDirectory=/home/magno/work/tiktok-react/beckend
+Environment="PATH=/home/magno/work/tiktok-react/beckend/venv/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="DISPLAY=:0"
 
 # Comando para iniciar o scheduler
-ExecStart=/home/magno/Works/vps/vps_167/tiktok-react/beckend/venv/bin/python start_scheduler.py start
+ExecStart=/home/magno/work/tiktok-react/beckend/venv/bin/python start_scheduler.py start
 
 # Comando para parar gracefully
-ExecStop=/home/magno/Works/vps/vps_167/tiktok-react/beckend/venv/bin/python start_scheduler.py stop
+ExecStop=/home/magno/work/tiktok-react/beckend/venv/bin/python start_scheduler.py stop
 
 # Restart automático
 Restart=always
 RestartSec=10
 
 # Logs
-StandardOutput=append:/home/magno/Works/vps/vps_167/tiktok-react/beckend/logs/scheduler.log
-StandardError=append:/home/magno/Works/vps/vps_167/tiktok-react/beckend/logs/scheduler-error.log
+StandardOutput=append:/home/magno/work/tiktok-react/beckend/logs/scheduler.log
+StandardError=append:/home/magno/work/tiktok-react/beckend/logs/scheduler-error.log
 
 # Tempo para shutdown graceful
 TimeoutStopSec=30

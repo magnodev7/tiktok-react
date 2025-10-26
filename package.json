@@ -1,7 +1,10 @@
 {
   "name": "tiktok-react",
+  "version": "2.0.0",
+  "description": "Sistema profissional de agendamento e automação de postagens no TikTok",
+  "author": "Magno Dev",
+  "license": "MIT",
   "private": true,
-  "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host",

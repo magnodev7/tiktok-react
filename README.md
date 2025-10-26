@@ -1,5 +1,7 @@
 # 🎬 TikTok Scheduler - Sistema de Agendamento Automático
 
+> **Desenvolvido por Magno Dev**
+
 Sistema profissional completo para agendamento e automação de postagens no TikTok, com interface web moderna e API REST robusta.
 
 ![Status](https://img.shields.io/badge/status-active-success.svg)
@@ -7,6 +9,7 @@ Sistema profissional completo para agendamento e automação de postagens no Tik
 ![React](https://img.shields.io/badge/react-18.x-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue.svg)
+![Author](https://img.shields.io/badge/author-Magno%20Dev-blue.svg)
 
 ---
 
@@ -342,6 +345,14 @@ Veja mais: **[Troubleshooting Completo](docs/deployment/TROUBLESHOOTING.md)**
 
 ---
 
+## 👨‍💻 Desenvolvedor
+
+**Magno Dev**
+
+Sistema desenvolvido profissionalmente para agendamento e automação de postagens no TikTok. Combinando tecnologias modernas para criar uma solução completa e escalável.
+
+---
+
 ## 📝 Licença
 
 MIT
@@ -358,6 +369,11 @@ MIT
 
 ---
 
+---
+
+## 📞 Contato e Suporte
+
+**Desenvolvedor**: Magno Dev
 **Versão**: 2.0
 **Última atualização**: Outubro 2025
 
