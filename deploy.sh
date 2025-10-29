@@ -410,15 +410,22 @@ setup_backend() {
 
     # Criar ambiente virtual
     print_step "Criando ambiente virtual Python..."
-    if [ ! -d "venv" ]; then
+    if [ ! -d "venv" ] || [ ! -f "venv/bin/activate" ]; then
+        print_info "Criando ou reparando ambiente virtual..."
         python3 -m venv venv
-        print_success "Ambiente virtual criado"
+        print_success "Ambiente virtual pronto"
     else
         print_info "Ambiente virtual já existe"
     fi
 
+    if [ ! -f "venv/bin/activate" ]; then
+        print_error "Falha ao preparar o ambiente virtual (arquivo activate ausente)"
+        exit 1
+    fi
+
     # Ativar venv
     print_step "Ativando ambiente virtual..."
+    # shellcheck source=/dev/null
     source venv/bin/activate
     print_success "Ambiente virtual ativado"
 
