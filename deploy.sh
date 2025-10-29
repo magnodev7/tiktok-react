@@ -171,93 +171,59 @@ check_dependencies() {
     fi
 
     # ═══════════════════════════════════════════════════════════════
-    # DOCKER COMPOSE
+    # DOCKER COMPOSE (versão robusta)
     # ═══════════════════════════════════════════════════════════════
     print_step "Verificando Docker Compose..."
 
-    local has_compose_plugin=false
-    local has_compose_standalone=false
-
-    # Verificar plugin do Docker Compose (docker compose)
-    if docker compose version &> /dev/null 2>&1; then
-        has_compose_plugin=true
-    fi
-
-    # ═══════════════════════════════════════════════════════════════
-    # GOOGLE CHROME (necessário para Selenium)
-    # ═══════════════════════════════════════════════════════════════
-    print_step "Verificando Google Chrome..."
-    if [ -x "/opt/google/chrome/chrome" ]; then
-        local chrome_version=$(/opt/google/chrome/chrome --version 2>/dev/null | cut -d ' ' -f3)
-        print_success "Google Chrome instalado: ${chrome_version:-desconhecido}"
-    else
-        print_warning "Google Chrome não encontrado. Instalando..."
-        update_apt_if_needed
-
-        sudo apt install -y wget gpg 2>/dev/null || sudo apt install -y wget gnupg
-        if [ ! -f /usr/share/keyrings/google.gpg ]; then
-            curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google.gpg
+    is_docker_compose_valid() {
+        if ! command -v docker-compose &> /dev/null; then
+            return 1
         fi
-        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list > /dev/null
-        sudo apt update -qq
-        sudo apt install -y google-chrome-stable
 
-        if [ -x "/opt/google/chrome/chrome" ]; then
-            print_success "Google Chrome instalado com sucesso"
-        else
-            print_error "Falha ao instalar o Google Chrome. Verifique a saída acima."
+        local version_output
+        version_output=$(docker-compose --version 2>/dev/null) || return 1
+
+        if [[ "$version_output" == *"vbuild"* ]] || [[ ${#version_output} -lt 20 ]]; then
+            return 1
+        fi
+
+        if [[ "$version_output" =~ v2\. ]] || [[ "$version_output" =~ v1\.29 ]]; then
+            return 0
+        fi
+
+        return 1
+    }
+
+    if is_docker_compose_valid; then
+        local compose_version
+        compose_version=$(docker-compose --version | cut -d ' ' -f4 | tr -d ',')
+        print_success "Docker Compose válido instalado: v$compose_version"
+    else
+        print_warning "Docker Compose ausente, inválido ou desatualizado. Reinstalando..."
+
+        sudo rm -f /usr/bin/docker-compose /usr/local/bin/docker-compose
+
+        local compose_version
+        compose_version=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d\" -f4)
+
+        if [ -z "$compose_version" ]; then
+            print_error "Falha ao obter a versão mais recente do Docker Compose"
             exit 1
         fi
-    fi
 
-    # Verificar Docker Compose standalone (docker-compose)
-    if command -v docker-compose &> /dev/null; then
-        has_compose_standalone=true
-    fi
-
-    if [ "$has_compose_plugin" = true ] && [ "$has_compose_standalone" = true ]; then
-        local compose_version=$(docker-compose --version | cut -d ' ' -f4 | tr -d ',')
-        print_success "Docker Compose instalado: v$compose_version"
-    elif [ "$has_compose_plugin" = true ]; then
-        # Tem plugin mas não tem standalone - instalar standalone
-        print_warning "Docker Compose plugin encontrado, instalando versão standalone..."
-
-        # Baixar última versão do Docker Compose
-        local compose_version=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d\" -f4)
         print_info "Instalando Docker Compose $compose_version..."
-
         sudo curl -L "https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-$(uname -s)-$(uname -m)" \
             -o /usr/local/bin/docker-compose
         sudo chmod +x /usr/local/bin/docker-compose
-
-        # Criar link simbólico
-        sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
-
-        print_success "Docker Compose standalone instalado: $compose_version"
-    elif [ "$has_compose_standalone" = true ]; then
-        # Tem standalone mas não tem plugin
-        local compose_version=$(docker-compose --version | cut -d ' ' -f4 | tr -d ',')
-        print_success "Docker Compose instalado: v$compose_version"
-    else
-        # Não tem nenhum - instalar ambos
-        print_warning "Docker Compose não encontrado. Instalando..."
-
-        # Instalar plugin
-        update_apt_if_needed
-        sudo apt install -y docker-compose-plugin 2>/dev/null || true
-
-        # Instalar standalone
-        local compose_version=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d\" -f4)
-        print_info "Instalando Docker Compose $compose_version..."
-
-        sudo curl -L "https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-$(uname -s)-$(uname -m)" \
-            -o /usr/local/bin/docker-compose
-        sudo chmod +x /usr/local/bin/docker-compose
-
-        # Criar link simbólico
         sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
 
         print_success "Docker Compose instalado: $compose_version"
+    fi
+
+    # Garante que o plugin `docker compose` também esteja disponível
+    if ! docker compose version &> /dev/null; then
+        update_apt_if_needed
+        sudo apt install -y docker-compose-plugin 2>/dev/null || true
     fi
 
     # ═══════════════════════════════════════════════════════════════
