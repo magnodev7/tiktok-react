@@ -1,5 +1,6 @@
-import { Clock, Plus, Download, Upload, Trash2, Save, AlertCircle } from 'lucide-react';
+import { Clock, Plus, Download, Upload, Trash2, Save, AlertCircle, Pencil, Check, X } from 'lucide-react';
 import { useState, useEffect } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import Button from '@/components/common/Button';
 import Card from '@/components/common/Card';
 import Input from '@/components/common/Input';
@@ -13,37 +14,159 @@ export default function PostingSchedules() {
   const [schedules, setSchedules] = useState([]);
   const [hasChanges, setHasChanges] = useState(false);
   const [error, setError] = useState('');
-  
+  const [editingIndex, setEditingIndex] = useState(null);
+  const [editingValue, setEditingValue] = useState('');
+  const [pendingHighlight, setPendingHighlight] = useState(null);
+
   const { data: accounts, isLoading: accountsLoading } = useAccounts();
   const { selectedAccountId, setSelectedAccountId } = useSelectedAccount();
+  const location = useLocation();
+  const navigate = useNavigate();
   
   // Buscar horários salvos da conta selecionada
   const { data: savedSchedules, isLoading: schedulesLoading } = useSchedules(selectedAccountId);
   const saveSchedulesMutation = useSaveSchedules();
 
+  const normalizeTime = (value) => {
+    if (!value) return null;
+    const raw = `${value}`.trim();
+    if (!raw) return null;
+
+    if (raw.includes('T')) {
+      const afterT = raw.split('T')[1] || '';
+      return normalizeTime(afterT.slice(0, 5));
+    }
+
+    if (/^\d{2}:\d{2}:\d{2}$/.test(raw)) {
+      return raw.slice(0, 5);
+    }
+
+    if (/^\d{1,2}:\d{2}$/.test(raw)) {
+      const [hh, mm] = raw.split(':');
+      const hour = Number(hh);
+      const minute = Number(mm);
+      if (Number.isInteger(hour) && Number.isInteger(minute) && hour >= 0 && hour < 24 && minute >= 0 && minute < 60) {
+        return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+      }
+    }
+
+    if (/^\d{1,2}$/.test(raw)) {
+      const hour = Number(raw);
+      if (hour >= 0 && hour < 24) {
+        return `${String(hour).padStart(2, '0')}:00`;
+      }
+    }
+
+    return null;
+  };
+
   // Carregar horários quando mudar de conta
   useEffect(() => {
     if (savedSchedules && Array.isArray(savedSchedules)) {
-      setSchedules(savedSchedules);
+      setSchedules(
+        savedSchedules
+          .map((time) => normalizeTime(time))
+          .filter(Boolean)
+          .sort()
+      );
       setHasChanges(false);
+      setError('');
     } else if (selectedAccountId && !schedulesLoading) {
       // Se não tem horários salvos, usar padrão
       setSchedules(['08:00', '12:00', '16:00', '20:00']);
       setHasChanges(false);
+      setError('');
     }
   }, [savedSchedules, selectedAccountId, schedulesLoading]);
 
-  const addSchedule = () => {
-    if (newTime && !schedules.includes(newTime)) {
-      setSchedules([...schedules, newTime].sort());
-      setNewTime('');
-      setHasChanges(true);
+  // Captura highlight da URL (ex.: ?highlight=16:40)
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const highlight = params.get('highlight');
+    if (highlight) {
+      setPendingHighlight(highlight);
+    } else {
+      setPendingHighlight(null);
     }
+  }, [location.search]);
+
+  // Aplica highlight quando horários carregados
+  useEffect(() => {
+    if (!pendingHighlight || !schedules.length) {
+      return;
+    }
+    const target = normalizeTime(pendingHighlight);
+    if (!target) {
+      return;
+    }
+    const idx = schedules.findIndex((time) => time === target);
+    if (idx >= 0) {
+      setEditingIndex(idx);
+      setEditingValue(schedules[idx]);
+      // Limpa highlight da URL sem navegar
+      navigate(location.pathname, { replace: true });
+    }
+  }, [pendingHighlight, schedules, navigate, location.pathname]);
+
+  const addSchedule = () => {
+    const normalized = normalizeTime(newTime);
+    if (!normalized) {
+      setError('Informe um horário válido no formato HH:MM');
+      return;
+    }
+    if (schedules.includes(normalized)) {
+      setError('Este horário já está configurado');
+      return;
+    }
+    setSchedules([...schedules, normalized].sort());
+    setNewTime('');
+    setHasChanges(true);
+    setError('');
   };
 
   const removeSchedule = (time) => {
-    setSchedules(schedules.filter(t => t !== time));
+    setSchedules((prev) =>
+      prev.filter((t, idx) => {
+        const match = t === time;
+        if (match && editingIndex === idx) {
+          cancelEditing();
+        }
+        return !match;
+      })
+    );
     setHasChanges(true);
+    setError('');
+  };
+
+  const startEditing = (time, index) => {
+    setEditingIndex(index);
+    setEditingValue(time);
+    setError('');
+  };
+
+  const cancelEditing = () => {
+    setEditingIndex(null);
+    setEditingValue('');
+    navigate(location.pathname, { replace: true });
+  };
+
+  const confirmEditing = () => {
+    const normalized = normalizeTime(editingValue);
+    if (!normalized) {
+      setError('Informe um horário válido no formato HH:MM');
+      return;
+    }
+    if (schedules.some((time, idx) => idx !== editingIndex && time === normalized)) {
+      setError('Este horário já está configurado');
+      return;
+    }
+    const updated = schedules.map((time, idx) => (idx === editingIndex ? normalized : time)).sort();
+    setSchedules(updated);
+    setHasChanges(true);
+    setEditingIndex(null);
+    setEditingValue('');
+    setError('');
+    navigate(location.pathname, { replace: true });
   };
 
   const applyPreset = (preset) => {
@@ -85,6 +208,8 @@ export default function PostingSchedules() {
     if (window.confirm('Tem certeza que deseja remover todos os horários?')) {
       setSchedules([]);
       setHasChanges(true);
+      cancelEditing();
+      setError('');
     }
   };
 
@@ -302,19 +427,60 @@ export default function PostingSchedules() {
               <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 mb-6">
                 {schedules.map((time, index) => (
                   <div
-                    key={time}
+                    key={`${time}-${index}`}
                     data-testid="time-slot"
                     data-time={time}
                     data-index={index}
-                    className="flex items-center justify-between p-3 bg-background border border-border rounded-lg hover:border-accent transition-colors group"
+                    className="p-3 bg-background border border-border rounded-lg hover:border-accent transition-colors"
                   >
-                    <span className="text-lg font-mono font-semibold text-text-primary">{time}</span>
-                    <button
-                      onClick={() => removeSchedule(time)}
-                      className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-500/10 rounded transition-all"
-                    >
-                      <Trash2 className="w-4 h-4 text-red-500" />
-                    </button>
+                    {editingIndex === index ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="time"
+                          value={editingValue}
+                          onChange={(e) => setEditingValue(e.target.value)}
+                          className="flex-1 h-9 rounded border border-border bg-background px-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+                        />
+                        <button
+                          onClick={confirmEditing}
+                          type="button"
+                          className="p-1.5 rounded-full bg-green-500/15 text-green-500 hover:bg-green-500/25 transition-all"
+                          title="Aplicar"
+                        >
+                          <Check className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={cancelEditing}
+                          type="button"
+                          className="p-1.5 rounded-full bg-red-500/15 text-red-500 hover:bg-red-500/25 transition-all"
+                          title="Cancelar"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-lg font-mono font-semibold text-text-primary">{time}</span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => startEditing(time, index)}
+                            type="button"
+                            className="p-1.5 rounded-full bg-accent/15 text-accent hover:bg-accent/25 transition-all"
+                            title="Editar horário"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => removeSchedule(time)}
+                            type="button"
+                            className="p-1.5 rounded-full bg-red-500/15 text-red-500 hover:bg-red-500/25 transition-all"
+                            title="Remover horário"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

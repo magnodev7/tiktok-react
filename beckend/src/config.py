@@ -42,10 +42,35 @@ TIKTOK_PASS = os.getenv("TIKTOK_PASS", "")
 # Diretório base do projeto (um nível acima de beckend/)
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
+def _resolve_project_path(raw: str, default: str) -> str:
+    """
+    Normaliza caminhos relativos para a raiz do projeto.
+    Evita salvar dados dentro de src/ quando um caminho relativo é fornecido.
+    """
+    if not raw:
+        return default
+
+    candidate = os.path.expanduser(raw.strip())
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(_PROJECT_ROOT, candidate)
+    candidate = os.path.abspath(candidate)
+
+    try:
+        src_root = os.path.join(_PROJECT_ROOT, "src")
+        if os.path.commonpath([candidate, src_root]) == src_root:
+            return default
+    except Exception:
+        # Em sistemas que não suportam commonpath adequadamente, faz verificação manual
+        if os.path.abspath(candidate).startswith(os.path.abspath(os.path.join(_PROJECT_ROOT, "src"))):
+            return default
+
+    return candidate
+
 # IMPORTANTE: profiles/ persiste logins do Chrome entre execuções
-BASE_USER_DATA_DIR = os.getenv("BASE_USER_DATA_DIR", os.path.join(_PROJECT_ROOT, "profiles"))
-BASE_VIDEO_DIR = os.getenv("BASE_VIDEO_DIR", os.path.join(_PROJECT_ROOT, "videos"))
-BASE_POSTED_DIR = os.getenv("BASE_POSTED_DIR", os.path.join(_PROJECT_ROOT, "posted"))
+BASE_USER_DATA_DIR = _resolve_project_path(os.getenv("BASE_USER_DATA_DIR"), os.path.join(_PROJECT_ROOT, "profiles"))
+BASE_VIDEO_DIR = _resolve_project_path(os.getenv("BASE_VIDEO_DIR"), os.path.join(_PROJECT_ROOT, "videos"))
+BASE_POSTED_DIR = _resolve_project_path(os.getenv("BASE_POSTED_DIR"), os.path.join(_PROJECT_ROOT, "posted"))
 
 ACCOUNTS_FILE = os.getenv("ACCOUNTS_FILE", "accounts.json")
 CONFIG_FILE = os.getenv("CONFIG_FILE", "admin_config.json")

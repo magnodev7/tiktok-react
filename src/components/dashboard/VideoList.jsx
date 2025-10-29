@@ -1,10 +1,17 @@
 import { Calendar, Trash2, Edit } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import Badge from '../common/Badge';
 import { formatRelativeTime, formatDate, formatTime } from '@/utils/dateFormatter';
 import { useDeleteVideo } from '@/hooks/useScheduledVideos';
+import { useAccounts } from '@/hooks/useAccounts';
+import { useSelectedAccount } from '@/contexts/SelectedAccountContext';
+import apiClient from '@/api/client';
 
 export default function VideoList({ videos = [] }) {
   const deleteMutation = useDeleteVideo();
+  const { data: accounts } = useAccounts();
+  const { setSelectedAccountId } = useSelectedAccount();
+  const queryClient = useQueryClient();
 
   const getStatusVariant = (status) => {
     const variants = {
@@ -30,6 +37,48 @@ export default function VideoList({ videos = [] }) {
         console.error('Erro ao deletar vídeo:', error);
         alert('Erro ao deletar vídeo');
       }
+    }
+  };
+
+  const handleEdit = async (video) => {
+    if (!video) return;
+    if (accounts && accounts.length) {
+      const match = accounts.find((acc) => acc.account_name === video.account);
+      if (match) {
+        setSelectedAccountId(String(match.id));
+      }
+    }
+
+    let defaultValue = '';
+    try {
+      if (video.scheduled_at) {
+        const dt = new Date(video.scheduled_at);
+        if (!isNaN(dt.getTime())) {
+          defaultValue = new Date(dt.getTime() - dt.getTimezoneOffset() * 60000)
+            .toISOString()
+            .slice(0, 16);
+        }
+      }
+    } catch (error) {
+      console.warn('Erro ao preparar horário padrão', error);
+    }
+
+    const input = window.prompt('Novo horário (formato yyyy-mm-ddThh:mm)', defaultValue);
+    if (!input) {
+      return;
+    }
+
+    try {
+      await apiClient.post(`/api/videos/${video.account}/${video.video_path}/reschedule`, {
+        new_datetime: input,
+      });
+      queryClient.invalidateQueries({ queryKey: ['videos', 'scheduled'] });
+      queryClient.invalidateQueries({ queryKey: ['videos'] });
+      alert('Horário atualizado com sucesso. O scheduler vai postar no novo horário.');
+    } catch (error) {
+      console.error('Erro ao reagendar vídeo:', error);
+      const message = error.response?.data?.message || error.response?.data?.detail || error.message;
+      alert(`Falha ao reagendar: ${message}`);
     }
   };
 
@@ -140,11 +189,11 @@ export default function VideoList({ videos = [] }) {
                 </Badge>
                 <div className="flex gap-2">
                   <button 
-                    className="p-1.5 rounded transition-colors cursor-not-allowed opacity-50"
-                    title="Edição ainda não disponível"
-                    disabled
+                    onClick={() => handleEdit(video)}
+                    className="p-1.5 hover:bg-accent/10 rounded transition-colors"
+                    title="Editar horário"
                   >
-                    <Edit className="w-4 h-4 text-text-secondary" />
+                    <Edit className="w-4 h-4 text-accent" />
                   </button>
                   <button
                     onClick={() => handleDelete(video)}

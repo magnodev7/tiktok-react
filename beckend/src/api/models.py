@@ -13,6 +13,25 @@ class ScheduleUpdate(BaseModel):
     schedules: List[str]
 
 
+class RescheduleVideoRequest(BaseModel):
+    new_datetime: dt.datetime
+
+    @field_validator("new_datetime", mode="before")
+    @classmethod
+    def parse_datetime(cls, value):
+        if isinstance(value, dt.datetime):
+            return value
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ValueError("new_datetime não pode ser vazio")
+            try:
+                return dt.datetime.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError("Formato inválido. Use ISO 8601, ex: 2025-10-28T16:45") from exc
+        raise ValueError("new_datetime deve ser datetime ou string ISO 8601")
+
+
 class PostNowRequest(BaseModel):
     video_path: str
     account: str

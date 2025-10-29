@@ -41,6 +41,11 @@ for _extra in (MaxRetryError, NewConnectionError, ConnectTimeoutError):
         TRANSIENT_DRIVER_ERRORS.append(_extra)
 TRANSIENT_DRIVER_ERRORS = tuple(TRANSIENT_DRIVER_ERRORS)
 
+# ====== Lock global para serializar postagens entre TODAS as contas ======
+# Garante que apenas UMA conta por vez execute o processo completo de postagem
+# (criar Chrome, login, upload, finalização) para evitar sobrecarga de recursos
+_GLOBAL_POSTING_LOCK = threading.Lock()
+
 # ====== Config de fuso e estado ======
 APP_TZ = ZoneInfo(os.getenv("TZ", "America/Sao_Paulo"))
 STATE_DIR = Path(os.getenv("BASE_STATE_DIR", "./state"))
@@ -266,8 +271,12 @@ class TikTokScheduler:
         self._logger = logger or (lambda m: print(f"[{_now_app().strftime('%H:%M:%S')}] {m}"))
         # Instância ISOLADA de scheduler para esta conta (não compartilhada!)
         self.schedule = schedule_module.Scheduler()
+        # Lock para prevenir execuções simultâneas de scheduled_posting()
+        self._posting_lock = threading.Lock()
+        self._chromedriver_pid: Optional[int] = None
         self.kill_chrome_processes()
         self._temp_profile_dir = None
+        self._chromedriver_pid = None
         self.log(f"🟢 Sistema iniciado para conta: {account_name}")
 
     def log(self, msg: str):
@@ -279,21 +288,49 @@ class TikTokScheduler:
         ensure_base()
         self.log(f"📂 Pastas configuradas para: {self.account}")
 
-    @staticmethod
-    def kill_chrome_processes():
-        """Mata processos filhos do Chrome que possam ter ficado órfãos."""
+    def kill_chrome_processes(self):
+        """
+        Mata apenas processos de Chrome/Chromedriver associados a esta conta.
+        Evita encerrar sessões de outras contas que estejam rodando simultaneamente.
+        """
+        profile_dir = getattr(self, "_temp_profile_dir", None)
+        account_profile = os.path.abspath(self.USER_DATA_DIR)
+        runtime_parent = os.path.dirname(profile_dir.rstrip(os.sep)) if profile_dir else None
+        chromedriver_pid = getattr(self, "_chromedriver_pid", None)
+
+        keywords = {
+            account_profile,
+            profile_dir if profile_dir else None,
+            runtime_parent if runtime_parent and runtime_parent != account_profile else None,
+        }
+        keywords = {os.path.abspath(k) for k in keywords if k}
+
         try:
-            parent = psutil.Process(os.getpid())
-            for child in parent.children(recursive=True):
-                name = child.name().lower()
-                if "chrome" in name or "chromedriver" in name:
+            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+                pid = proc.info.get("pid")
+                name = (proc.info.get("name") or "").lower()
+                if "chrome" not in name and "chromedriver" not in name:
+                    continue
+
+                cmdline_list = proc.info.get("cmdline") or []
+                cmdline = " ".join(cmdline_list)
+                matches_profile = any(k in cmdline for k in keywords)
+                if not matches_profile and chromedriver_pid and pid == chromedriver_pid:
+                    matches_profile = True
+
+                if not matches_profile:
+                    continue
+
+                try:
+                    proc.send_signal(signal.SIGTERM)
+                    proc.wait(2)
+                except Exception:
+                    pass
+                if proc.is_running():
                     try:
-                        child.send_signal(signal.SIGTERM)
-                        child.wait(2)
+                        proc.kill()
                     except Exception:
                         pass
-                    if child.is_running():
-                        child.kill()
         except Exception:
             pass
 
@@ -336,27 +373,47 @@ class TikTokScheduler:
                                 pass
         self.kill_chrome_processes()
         self._temp_profile_dir = None
+        self._chromedriver_pid = None
 
     def _ensure_logged(self) -> bool:
         if TEST_MODE:
             self.log("🚧 Modo teste: simulação de login OK")
             return True
 
-        from .driver import get_fresh_driver
+        from .driver import get_fresh_driver, is_session_alive
+        from .cookies import cookies_marked_invalid
 
         attempt_limit = max(1, getattr(self, "max_session_attempts", 20))
         retry_delay = max(0.0, getattr(self, "session_retry_delay", 5.0))
         last_error = None
 
+        if cookies_marked_invalid(self.account):
+            self.log("❌ Cookies marcados como inválidos. Atualize-os via painel antes de novas tentativas.")
+            return False
+
         for attempt in range(1, attempt_limit + 1):
             ok = False
             if attempt > 1:
                 self.log(f"🔁 Tentativa {attempt}/{attempt_limit} para restabelecer sessão do Chrome")
-            self.close_driver()
-            self.kill_chrome_processes()
 
             try:
-                self.driver = get_fresh_driver(None, profile_base_dir=self.USER_DATA_DIR, account_name=self.account)
+                existing = getattr(self, "driver", None)
+                if existing and is_session_alive(existing):
+                    try:
+                        current_url = existing.current_url.lower()
+                    except Exception:
+                        current_url = ""
+                    if "login" not in current_url and "tiktok.com" in current_url:
+                        self.log("🔄 Reutilizando sessão Chrome já autenticada")
+                        return True
+
+                if existing and not is_session_alive(existing):
+                    self.close_driver()
+
+                if self.driver is None:
+                    self.driver = get_fresh_driver(None, profile_base_dir=self.USER_DATA_DIR, account_name=self.account)
+
+                self._chromedriver_pid = getattr(self.driver, "_service_pid", None)
                 self._temp_profile_dir = getattr(self.driver, "_profile_dir", None)
                 self.log(f"🔐 Tentando login com cookies da conta: {self.account} (tentativa {attempt}/{attempt_limit})")
                 ok = load_cookies_for_account(self.driver, self.account)
@@ -367,6 +424,8 @@ class TikTokScheduler:
                     return True
                 last_error = "cookies inválidos"
                 self.log(f"❌ Falha no login com cookies (tentativa {attempt}/{attempt_limit})")
+                # Não faz sentido tentar novamente com os mesmos cookies
+                break
             except TRANSIENT_DRIVER_ERRORS as e:
                 last_error = e
                 self.log(f"⚠️ Falha na sessão Chrome (tentativa {attempt}/{attempt_limit}): {e}")
@@ -669,51 +728,82 @@ class TikTokScheduler:
 
     # -------- tick principal --------
     def scheduled_posting(self):
-        if not self.scheduler_active:
-            self.log("ℹ️ Agendador inativo; pulando.")
+        # Previne execuções simultâneas (race condition entre job diário e catch-up)
+        if not self._posting_lock.acquire(blocking=False):
+            self.log("⏭️ Postagem já em execução, pulando tick duplicado")
             return
+        lock_acquired = False
+        try:
+            if not self.scheduler_active:
+                self.log("ℹ️ Agendador inativo; pulando.")
+                return
 
-        now_str = _now_app().strftime("%H:%M")
-        self.log("\n" + "="*50)
-        self.log(f"⏰ INICIANDO POSTAGEM AGENDADA ({now_str})")
-        self.log("="*50)
+            now_str = _now_app().strftime("%H:%M")
+            self.log("\n" + "="*50)
+            self.log(f"⏰ INICIANDO POSTAGEM AGENDADA ({now_str})")
+            self.log("="*50)
 
-        candidates = self._collect_candidates()
-        due = self._due_now(candidates)
-        self.log(f"📊 Candidatos: {len(candidates)} • Due agora: {len(due)}")
-        if not due:
-            self.log("📭 Nenhum vídeo due neste momento")
-            return
+            candidates = self._collect_candidates()
+            due = self._due_now(candidates)
+            self.log(f"📊 Candidatos: {len(candidates)} • Due agora: {len(due)}")
+            if not due:
+                self.log("📭 Nenhum vídeo due neste momento")
+                return
 
-        # garante 1 por rodada; reagenda excedentes
-        due.sort(key=lambda dv: dv.scheduled_at)
-        to_post = [due[0]]
-        leftovers = due[1:]
-        self._reschedule_leftovers(leftovers)
+            # garante 1 por rodada; reagenda excedentes
+            due.sort(key=lambda dv: dv.scheduled_at)
+            to_post = [due[0]]
+            leftovers = due[1:]
+            self._reschedule_leftovers(leftovers)
 
-        if not self._ensure_logged():
-            self.log("❌ Sem sessão válida (cookies inválidos ou ausentes)")
-            self.log(f"💡 SOLUÇÃO: Acesse o painel e atualize os cookies da conta '{self.account}'")
-            self.log(f"   1. Vá em 'Contas TikTok' → Editar conta '{self.account}'")
-            self.log(f"   2. Cole os cookies atualizados do navegador")
-            self.log(f"   3. Os vídeos permanecerão na fila até que os cookies sejam atualizados")
-            return
+            if not self._ensure_logged():
+                self.log("❌ Sem sessão válida (cookies inválidos ou ausentes)")
+                self.log(f"💡 SOLUÇÃO: Acesse o painel e atualize os cookies da conta '{self.account}'")
+                self.log(f"   1. Vá em 'Contas TikTok' → Editar conta '{self.account}'")
+                self.log(f"   2. Cole os cookies atualizados do navegador")
+                self.log(f"   3. Os vídeos permanecerão na fila até que os cookies sejam atualizados")
+                return
 
-        for i, dv in enumerate(to_post, 1):
-            self.log(f"\n📤 Postando vídeo {i} de {len(to_post)} :: {Path(dv.path).name}")
-            try:
-                ok = self._post_one(dv.path)
-            except TRANSIENT_DRIVER_ERRORS as e:
-                self.log(f"⚠️ Erro de sessão do Chrome ({type(e).__name__}): {e}; tentando relogar…")
-                self.close_driver()
-                ok = self._ensure_logged() and self._post_one(dv.path)
+            # LOCK GLOBAL: somente após sessão válida, para não bloquear outras contas durante o login
+            self.log(f"⏳ [{self.account}] Aguardando vez para postar...")
+            _GLOBAL_POSTING_LOCK.acquire()
+            lock_acquired = True
+            self.log(f"🔓 [{self.account}] Lock global adquirido, iniciando postagem...")
 
-            if ok:
-                self._finalize_success(dv.path)
-            else:
-                self.log("❌ Postagem não confirmada; manteremos o arquivo em /videos")
+            for i, dv in enumerate(to_post, 1):
+                self.log(f"\n📤 Postando vídeo {i} de {len(to_post)} :: {Path(dv.path).name}")
 
-        self.log("✅ Tick concluído\n")
+                # Verificação dupla: confirma que o vídeo ainda não foi postado (previne duplicatas)
+                p = Path(dv.path)
+                unified_path = p.with_suffix(".json")
+                if unified_path.exists():
+                    meta = _read_json(unified_path)
+                    if meta and (meta.get("status") == "posted" or meta.get("posted_at")):
+                        self.log(f"⚠️ Vídeo já postado (detectado em verificação dupla), pulando: {p.name}")
+                        continue
+
+                try:
+                    ok = self._post_one(dv.path)
+                except TRANSIENT_DRIVER_ERRORS as e:
+                    self.log(f"⚠️ Erro de sessão do Chrome ({type(e).__name__}): {e}; tentando relogar…")
+                    self.close_driver()
+                    ok = self._ensure_logged() and self._post_one(dv.path)
+
+                if ok:
+                    self._finalize_success(dv.path)
+                else:
+                    self.log("❌ Postagem não confirmada; manteremos o arquivo em /videos")
+
+            self.log("✅ Tick concluído\n")
+        finally:
+            # Sempre libera os locks, mesmo em caso de erro
+            if lock_acquired:
+                try:
+                    _GLOBAL_POSTING_LOCK.release()
+                    self.log(f"🔓 [{self.account}] Lock global liberado")
+                except:
+                    pass  # Se não estava adquirido, ignora
+            self._posting_lock.release()
 
     # -------- agendamento dos ticks --------
     def setup_schedules(self):

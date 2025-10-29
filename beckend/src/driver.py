@@ -7,6 +7,7 @@ import uuid
 import signal
 import subprocess
 import fcntl
+import threading
 from selenium import webdriver  # pyright: ignore[reportMissingImports]
 from selenium.webdriver.chrome.options import Options  # pyright: ignore[reportMissingImports]
 from selenium.webdriver.chrome.service import Service  # pyright: ignore[reportMissingImports]
@@ -17,6 +18,10 @@ from selenium.common.exceptions import ( # pyright: ignore[reportMissingImports]
 )  # pyright: ignore[reportMissingImports]
 from webdriver_manager.chrome import ChromeDriverManager  # pyright: ignore[reportMissingImports]
 from typing import Optional, List
+
+# Lock global para serializar APENAS a criação do Chrome (não a execução)
+# Isso evita conflitos de recursos quando múltiplas contas iniciam simultaneamente
+_CHROME_CREATION_LOCK = threading.Lock()
 
 def _is_remote() -> bool:
     return bool(os.getenv("SELENIUM_HUB_URL"))
@@ -50,7 +55,7 @@ def _remote_options_full(user_data_dir: Optional[str] = None) -> Options:
     opts.add_experimental_option("useAutomationExtension", False)
 
     # Configurações visuais e de navegação
-    opts.add_argument("--headless=chrome")  # Headless antigo costuma ser mais estável
+    opts.add_argument("--headless=new")  # Headless moderno (mais estável)
     opts.add_argument("--window-size=1920,1080")  # Tamanho consistente
     opts.add_argument("--lang=pt-BR")
     opts.add_argument("--no-first-run")
@@ -129,12 +134,11 @@ def _cleanup_conflicting_processes(profile_dir: Optional[str]) -> None:
         return
 
     parent = os.path.dirname(profile_dir.rstrip(os.sep))
-    grandparent = os.path.dirname(parent) if parent else ""
-    targets = [profile_dir]
-    if parent:
-        targets.append(parent)
-    if grandparent:
-        targets.append(grandparent)
+    targets = {profile_dir}
+    if parent and os.path.basename(parent) != "":
+        targets.add(parent)
+    # Evita mirar em diretórios compartilhados (ex.: raiz de profiles)
+    targets = {t for t in targets if t and os.path.basename(t)}
     victims = _collect_profile_processes(targets)
 
     if not victims:
@@ -241,7 +245,7 @@ def _resolve_profile_dir(profile_base_dir: Optional[str], remote: bool, account_
     Gera caminho de profile isolado por conta (perfil persistente).
 
     Estrutura:
-    - Local com REUSE_PROFILE=True: ./profiles/{account_name}/ (persistente, isolado por conta)
+    - Local com REUSE_PROFILE=True: ./profiles/{account_name}/chrome (persistente, isolado por conta)
     - Local sem REUSE_PROFILE: /tmp/chrome-user-data-{uuid} (temporário)
     - Remoto: /tmp/chrome-user-data-{uuid} (temporário)
 
@@ -267,13 +271,10 @@ def _resolve_profile_dir(profile_base_dir: Optional[str], remote: bool, account_
         account_profile_dir = os.path.join(profiles_dir, account_name)
         os.makedirs(account_profile_dir, exist_ok=True)
 
-        runtime_root = os.path.join(account_profile_dir, "runtime")
-        os.makedirs(runtime_root, exist_ok=True)
+        persistent_dir = os.path.join(account_profile_dir, "chrome")
+        os.makedirs(persistent_dir, exist_ok=True)
 
-        runtime_dir = os.path.join(runtime_root, uuid.uuid4().hex)
-        os.makedirs(runtime_dir, exist_ok=True)
-
-        return runtime_dir
+        return persistent_dir
 
     # Fallback: perfil temporário (apagado ao encerrar)
     suffix = uuid.uuid4().hex
@@ -306,38 +307,42 @@ def build_driver(profile_base_dir: Optional[str] = None, account_name: Optional[
             opts = _remote_options_full(profile_dir)
 
             max_retries = 3
-            for attempt in range(1, max_retries + 1):
-                try:
-                    print(f"📁 (remote) user-data-dir: {profile_dir}")
-                    driver = webdriver.Remote(
-                        command_executor=hub,
-                        options=opts,
-                    )
-
-                    # Scripts anti-detecção executados IMEDIATAMENTE após criar o driver
+            print(f"⏳ [{account_name}] Aguardando lock de criação do Chrome remoto...")
+            with _CHROME_CREATION_LOCK:
+                print(f"🔓 [{account_name}] Lock adquirido, criando Chrome remoto...")
+                for attempt in range(1, max_retries + 1):
                     try:
-                        driver.execute_script(
-                            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                        print(f"📁 (remote) user-data-dir: {profile_dir}")
+                        driver = webdriver.Remote(
+                            command_executor=hub,
+                            options=opts,
                         )
-                        driver.execute_script("window.navigator.chrome = {runtime: {}}")
-                        driver.execute_script("delete navigator.__proto__.webdriver")
-                    except Exception:
-                        # Mesmo que falhe, segue
-                        pass
 
-                    # Espera curta para estabilizar
-                    time.sleep(2)
+                        # Scripts anti-detecção executados IMEDIATAMENTE após criar o driver
+                        try:
+                            driver.execute_script(
+                                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                            )
+                            driver.execute_script("window.navigator.chrome = {runtime: {}}")
+                            driver.execute_script("delete navigator.__proto__.webdriver")
+                        except Exception:
+                            # Mesmo que falhe, segue
+                            pass
 
-                    break
+                        # Espera curta para estabilizar
+                        time.sleep(2)
+                        print(f"✅ [{account_name}] Chrome remoto criado, liberando lock...")
 
-                except (SessionNotCreatedException, WebDriverException) as e:
-                    print(f"⚠️ Tentativa {attempt} falhou: {str(e)}")
-                    if attempt < max_retries:
-                        time.sleep(3)
-                    else:
-                        raise Exception(
-                            f"Falha ao criar sessão remota após {max_retries} tentativas: {str(e)}"
-                        ) from e
+                        break
+
+                    except (SessionNotCreatedException, WebDriverException) as e:
+                        print(f"⚠️ Tentativa {attempt} falhou: {str(e)}")
+                        if attempt < max_retries:
+                            time.sleep(3)
+                        else:
+                            raise Exception(
+                                f"Falha ao criar sessão remota após {max_retries} tentativas: {str(e)}"
+                            ) from e
         else:
             # Modo local: usa Chrome instalado no sistema com webdriver-manager
             print("🔧 Usando Chrome local com webdriver-manager...")
@@ -356,38 +361,47 @@ def build_driver(profile_base_dir: Optional[str] = None, account_name: Optional[
 
             opts = _remote_options_full(profile_dir)
 
-            # Deixar Selenium encontrar Chrome automaticamente via PATH
-            # Apenas definir binary_location se CHROME_BINARY estiver explicitamente setado
+            # FORÇA uso do Chrome instalado via apt (não Flatpak)
             chrome_binary = os.getenv("CHROME_BINARY")
             if not chrome_binary:
-                for candidate in (
-                    "/opt/google/chrome/chrome",
-                    "/usr/bin/google-chrome",
-                    "/usr/bin/google-chrome-stable",
-                    "/usr/bin/chromium-browser",
-                    "/snap/bin/chromium",
-                    "/snap/chromium/current/usr/lib/chromium-browser/chrome",
-                ):
-                    if os.path.isfile(candidate):
-                        chrome_binary = candidate
-                        break
+                chrome_binary = "/opt/google/chrome/chrome"  # Força o Chrome instalado
+
             if chrome_binary and os.path.isfile(chrome_binary):
                 opts.binary_location = chrome_binary
                 print(f"📌 Chrome binary definido: {chrome_binary}")
+            else:
+                raise RuntimeError(f"Chrome não encontrado em: {chrome_binary}")
 
-            driver = webdriver.Chrome(service=service, options=opts)
+            # Lock global apenas durante a CRIAÇÃO do Chrome
+            # Isso serializa a inicialização mas permite execução paralela depois
+            print(f"⏳ [{account_name}] Aguardando lock de criação do Chrome...")
+            with _CHROME_CREATION_LOCK:
+                print(f"🔓 [{account_name}] Lock adquirido, criando Chrome...")
+                driver = webdriver.Chrome(service=service, options=opts)
 
-            # Scripts anti-detecção
-            try:
-                driver.execute_script(
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-                )
-                driver.execute_script("window.navigator.chrome = {runtime: {}}")
-                driver.execute_script("delete navigator.__proto__.webdriver")
-            except Exception:
-                pass
+                # Armazena PID do serviço Chromedriver para limpeza direcionada
+                try:
+                    service_process = getattr(service, "process", None)
+                    if service_process and getattr(service_process, "pid", None):
+                        setattr(driver, "_service_pid", service_process.pid)
+                except Exception:
+                    pass
 
-            time.sleep(2)
+                # Scripts anti-detecção
+                try:
+                    driver.execute_script(
+                        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                    )
+                    driver.execute_script("window.navigator.chrome = {runtime: {}}")
+                    driver.execute_script("delete navigator.__proto__.webdriver")
+                except Exception:
+                    pass
+
+                # Aguarda mais tempo para estabilizar completamente
+                time.sleep(4)
+                print(f"✅ [{account_name}] Chrome criado, liberando lock...")
+                # Delay adicional após liberar lock para evitar sobrecarga
+                time.sleep(1)
 
         if driver is None:
             raise RuntimeError("Falha ao criar driver do Chrome")

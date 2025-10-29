@@ -8,6 +8,10 @@ from urllib.parse import urlparse
 from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
+from datetime import datetime, timezone
+
+from .account_storage import AccountStorage
+
 logger = logging.getLogger("cookies")
 
 
@@ -167,6 +171,48 @@ def _set_cookie_via_cdp(driver: WebDriver, cookie: Dict[str, Any], base_url: str
         logger.debug(f"CDP setCookie falhou para {cookie.get('name')}: {e}")
         return False
 
+
+def _account_cookie_marker(account_name: str) -> Path:
+    storage = AccountStorage()
+    structure = storage.get_account_structure(account_name)
+    structure["cookies"].mkdir(parents=True, exist_ok=True)
+    return structure["cookies"] / "cookies_invalid.json"
+
+
+def mark_cookies_invalid(account_name: str, reason: str) -> None:
+    marker = _account_cookie_marker(account_name)
+    payload = {
+        "account": account_name,
+        "reason": reason,
+        "marked_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        logger.debug("Não foi possível gravar marker de cookies inválidos", exc_info=True)
+
+
+def clear_cookies_invalid_marker(account_name: str) -> None:
+    marker = _account_cookie_marker(account_name)
+    if marker.exists():
+        try:
+            marker.unlink()
+        except Exception:
+            logger.debug("Não foi possível remover marker de cookies inválidos", exc_info=True)
+
+
+def cookies_marked_invalid(account_name: str) -> bool:
+    marker = _account_cookie_marker(account_name)
+    return marker.exists()
+
+
+def _cookies_expired(cookies_list: List[Dict[str, Any]]) -> bool:
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    expiries = [int(cookie.get("expiry")) for cookie in cookies_list if cookie.get("expiry")]
+    if expiries and min(expiries) <= now_ts:
+        return True
+    return False
+
 def load_cookies_for_account(
     driver: WebDriver,
     account_name: str,
@@ -200,6 +246,24 @@ def load_cookies_for_account(
         driver.get(base_url)
         logger.info(f"✅ Página carregada: {driver.current_url}")
         print(f"✅ Página carregada: {driver.current_url}")
+
+        current_after_first_load = driver.current_url.lower()
+        already_logged = "login" not in current_after_first_load and "tiktok.com" in current_after_first_load
+
+        # Se já está logado, apenas reforça scripts anti-detecção e persiste cookies mais recentes
+        if already_logged:
+            logger.info(f"🔁 Sessão já ativa para '{account_name}', pulando reinjeção de cookies")
+            print(f"🔁 Sessão já ativa para '{account_name}', pulando reinjeção de cookies")
+            try:
+                driver.execute_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                )
+                driver.execute_script("window.navigator.chrome = {runtime: {}}")
+                driver.execute_script("delete navigator.__proto__.webdriver")
+            except Exception:
+                pass
+            save_cookies_for_account(driver, account_name)
+            return True
 
         try:
             driver.delete_all_cookies()
@@ -261,6 +325,13 @@ def load_cookies_for_account(
     if not cookies_list:
         logger.error(f"❌ Formato de cookies inválido para: {account_name}")
         print(f"❌ Formato de cookies inválido para: {account_name}")
+        return False
+
+    if _cookies_expired(cookies_list):
+        reason = "cookies expirados"
+        logger.error(f"❌ Cookies expirados para conta: {account_name}")
+        print(f"❌ Cookies expirados para conta: {account_name}")
+        mark_cookies_invalid(account_name, reason)
         return False
 
     # Adiciona cookies
@@ -350,12 +421,14 @@ def load_cookies_for_account(
         print(f"✅ Login bem-sucedido para conta: {account_name}")
         try:
             save_cookies_for_account(driver, account_name)
+            clear_cookies_invalid_marker(account_name)
         except Exception as e:
             logger.warning(f"⚠️ Falha ao persistir cookies atualizados para '{account_name}': {e}")
     else:
         reason = "timeout parcial" if (initial_timeout or second_timeout) else "redirecionado para login"
         logger.error(f"❌ Falha no login para conta: {account_name} (URL atual: {current_url}) [{reason}]")
         print(f"❌ Falha no login para conta: {account_name} (URL atual: {current_url}) [{reason}]")
+        mark_cookies_invalid(account_name, reason)
 
     return is_logged_in
 

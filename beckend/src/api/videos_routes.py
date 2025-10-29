@@ -28,18 +28,49 @@ from src.timezone_utils import get_app_timezone, now as tz_now
 
 from .schemas import APIResponse
 from .utils import raise_http_error, success_response
-from .models import PostNowRequest, ScheduleUpdate
+from .models import PostNowRequest, ScheduleUpdate, RescheduleVideoRequest
+from src.scheduler import _update_sidecars_for
 
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["videos"])
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_VIDEOS_DIR = BASE_DIR / "videos"
-DEFAULT_POSTED_DIR = BASE_DIR / "posted"
-DEFAULT_USERDATA_DIR = BASE_DIR / "user_data"
-DEFAULT_STATE_DIR = BASE_DIR / "state"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_VIDEOS_DIR = PROJECT_ROOT / "videos"
+DEFAULT_POSTED_DIR = PROJECT_ROOT / "posted"
+DEFAULT_USERDATA_DIR = PROJECT_ROOT / "profiles"
+DEFAULT_STATE_DIR = PROJECT_ROOT / "state"
+
+
+def _project_path(raw: Optional[str], default: Path) -> Path:
+    """
+    Normaliza caminhos configurados para sempre ficarem dentro do projeto.
+    Se o caminho não for absoluto, trata como relativo à raiz do projeto.
+    Também evita que arquivos sejam salvos em subpastas de src/.
+    """
+    if not raw:
+        return default
+
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = (PROJECT_ROOT / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+
+    src_root = (PROJECT_ROOT / "src").resolve()
+    try:
+        # Python 3.9+: evita salvar dentro de src/
+        if candidate.is_relative_to(src_root):
+            return default
+    except AttributeError:
+        if str(candidate).startswith(str(src_root)):
+            return default
+    except ValueError:
+        # Caminho fora do projeto, permitido
+        pass
+
+    return candidate
 
 
 def _ensure_dir(path: Path, fallback: Path) -> Path:
@@ -54,10 +85,18 @@ def _ensure_dir(path: Path, fallback: Path) -> Path:
         return fallback
 
 
-VIDEOS_DIR = _ensure_dir(Path(os.getenv("BASE_VIDEOS_DIR") or DEFAULT_VIDEOS_DIR), DEFAULT_VIDEOS_DIR)
-POSTED_DIR = _ensure_dir(Path(os.getenv("BASE_POSTED_DIR") or DEFAULT_POSTED_DIR), DEFAULT_POSTED_DIR)
-USERDATA_DIR = _ensure_dir(Path(os.getenv("BASE_USERDATA_DIR") or DEFAULT_USERDATA_DIR), DEFAULT_USERDATA_DIR)
-STATE_DIR = _ensure_dir(Path(os.getenv("BASE_STATE_DIR") or DEFAULT_STATE_DIR), DEFAULT_STATE_DIR)
+def _env_path(*keys: str, default: Path) -> Path:
+    for key in keys:
+        raw = os.getenv(key)
+        if raw:
+            return _project_path(raw, default)
+    return default
+
+
+VIDEOS_DIR = _ensure_dir(_env_path("BASE_VIDEOS_DIR", "BASE_VIDEO_DIR", default=DEFAULT_VIDEOS_DIR), DEFAULT_VIDEOS_DIR)
+POSTED_DIR = _ensure_dir(_env_path("BASE_POSTED_DIR", "BASE_POST_DIR", default=DEFAULT_POSTED_DIR), DEFAULT_POSTED_DIR)
+USERDATA_DIR = _ensure_dir(_project_path(os.getenv("BASE_USERDATA_DIR"), DEFAULT_USERDATA_DIR), DEFAULT_USERDATA_DIR)
+STATE_DIR = _ensure_dir(_project_path(os.getenv("BASE_STATE_DIR"), DEFAULT_STATE_DIR), DEFAULT_STATE_DIR)
 
 SCHEDULES_JSON = STATE_DIR / "schedules.json"
 LOGS_JSON = STATE_DIR / "logs.json"
@@ -72,6 +111,31 @@ if not LOGS_JSON.exists():
 
 def _add_log(message: str, level: str = "info", user_id: Optional[int] = None, account_name: Optional[str] = None) -> None:
     log_service.add_log(message=message, level=level, user_id=user_id, account_name=account_name, module="api-videos")
+
+
+def _normalise_hhmm(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        # Suporta datetime-local (YYYY-MM-DDTHH:MM[ss])
+        dt_local = dt.datetime.fromisoformat(raw)
+        return dt_local.strftime("%H:%M")
+    except Exception:
+        pass
+    candidates = [raw]
+    if len(raw) == 8 and raw.count(":") == 2:
+        candidates.append(raw[:5])
+    if len(raw) == 2 and raw.isdigit():
+        candidates.append(f"{int(raw):02d}:00")
+    for test in candidates:
+        if len(test) == 5 and test[2] == ":" and test[:2].isdigit() and test[3:].isdigit():
+            hh, mm = int(test[:2]), int(test[3:])
+            if 0 <= hh < 24 and 0 <= mm < 60:
+                return f"{hh:02d}:{mm:02d}"
+    return None
 
 
 def _acc_dir(base: Path, account: str) -> Path:
@@ -277,8 +341,10 @@ async def _upload_handler(
         except Exception:
             pass
 
-    if not final_iso and schedule_time and len(schedule_time.strip()) == 5:
-        wanted = schedule_time.strip()
+    schedule_time = _normalise_hhmm(schedule_time)
+
+    if not final_iso and schedule_time:
+        wanted = schedule_time
         for d in range(0, 31):
             day = (dt.datetime.now(APP_TZ) + dt.timedelta(days=d)).strftime("%Y-%m-%d")
             taken = _occupied_slots_for_date(acc, day)
@@ -479,6 +545,70 @@ async def delete_video(
         raise
     except Exception as exc:
         raise_http_error(status.HTTP_500_INTERNAL_SERVER_ERROR, error="delete_failed", message=str(exc))
+
+
+@router.post("/api/videos/{account}/{filename}/reschedule", response_model=APIResponse[dict])
+@router.post("/videos/{account}/{filename}/reschedule", response_model=APIResponse[dict])
+async def reschedule_video(
+    account: str,
+    filename: str,
+    payload: RescheduleVideoRequest,
+    current_user: UserModel = Depends(get_current_active_user),
+) -> APIResponse[dict]:
+    if not account or not account.strip():
+        raise_http_error(status.HTTP_400_BAD_REQUEST, error="account_required", message="Nome da conta é obrigatório")
+
+    acc = account.strip()
+    vdir = _acc_dir(VIDEOS_DIR, acc)
+    mp4_name = filename if filename.endswith(".mp4") else f"{filename}.mp4"
+    video_path = vdir / mp4_name
+
+    if not video_path.exists():
+        raise_http_error(status.HTTP_404_NOT_FOUND, error="video_not_found", message="Vídeo não encontrado")
+
+    target_dt = payload.new_datetime
+    if target_dt.tzinfo is None:
+        target_dt = target_dt.replace(tzinfo=APP_TZ)
+    else:
+        target_dt = target_dt.astimezone(APP_TZ)
+
+    if target_dt < dt.datetime.now(APP_TZ) - dt.timedelta(minutes=10):
+        raise_http_error(status.HTTP_400_BAD_REQUEST, error="past_datetime", message="A nova data/hora já passou")
+
+    new_hhmm = target_dt.strftime("%H:%M")
+    iso_utc = target_dt.astimezone(dt.timezone.utc).isoformat()
+
+    try:
+        _update_sidecars_for(str(video_path), new_hhmm, iso_utc, lambda msg: _add_log(msg, account_name=acc))
+    except Exception as exc:
+        raise_http_error(status.HTTP_500_INTERNAL_SERVER_ERROR, error="update_failed", message=str(exc))
+
+    json_path = video_path.with_suffix(".json")
+    if json_path.exists():
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        data["scheduled_at"] = iso_utc
+        data["schedule_time"] = new_hhmm
+        data["status"] = "pending"
+        data["posted_at"] = None
+        json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _add_log(
+        f"Horário do vídeo '{mp4_name}' atualizado para {target_dt.strftime('%Y-%m-%d %H:%M:%S')} (conta {acc})",
+        account_name=acc,
+        user_id=current_user.id,
+    )
+
+    return success_response(
+        message="Horário atualizado",
+        data={
+            "video": mp4_name,
+            "scheduled_at": iso_utc,
+            "schedule_time": new_hhmm,
+        },
+    )
 
 
 @router.get("/schedule/preview", response_model=APIResponse[dict])
