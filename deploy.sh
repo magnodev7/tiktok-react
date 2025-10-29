@@ -412,14 +412,32 @@ setup_backend() {
     print_step "Criando ambiente virtual Python..."
     if [ ! -d "venv" ] || [ ! -f "venv/bin/activate" ]; then
         print_info "Criando ou reparando ambiente virtual..."
-        python3 -m venv venv
-        print_success "Ambiente virtual pronto"
+        if python3 -m venv venv; then
+            print_success "Ambiente virtual pronto"
+        else
+            print_warning "Falha ao criar o ambiente virtual. Instalando dependências 'python3-venv'..."
+            if command -v apt-get &>/dev/null; then
+                sudo apt-get update -qq || true
+                if ! sudo apt-get install -y python3-venv; then
+                    local py_minor
+                    py_minor=$(python3 --version | awk '{print $2}' | cut -d'.' -f1,2)
+                    sudo apt-get install -y "python${py_minor}-venv" || true
+                fi
+            fi
+
+            if python3 -m venv venv; then
+                print_success "Ambiente virtual pronto após instalar python-venv"
+            else
+                print_error "Falha ao preparar o ambiente virtual mesmo após instalar python-venv"
+                exit 1
+            fi
+        fi
     else
         print_info "Ambiente virtual já existe"
     fi
 
     if [ ! -f "venv/bin/activate" ]; then
-        print_error "Falha ao preparar o ambiente virtual (arquivo activate ausente)"
+        print_error "Ambiente virtual inválido (venv/bin/activate ausente)"
         exit 1
     fi
 
