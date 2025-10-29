@@ -98,6 +98,9 @@ beckend/uploads/
 beckend/videos/
 beckend/posted/
 beckend/state/
+posted/
+profiles/
+state/
 
 # ───────────────────────────────────────────────────────────────
 # Banco de Dados

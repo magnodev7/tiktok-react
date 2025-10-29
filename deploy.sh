@@ -183,6 +183,33 @@ check_dependencies() {
         has_compose_plugin=true
     fi
 
+    # ═══════════════════════════════════════════════════════════════
+    # GOOGLE CHROME (necessário para Selenium)
+    # ═══════════════════════════════════════════════════════════════
+    print_step "Verificando Google Chrome..."
+    if [ -x "/opt/google/chrome/chrome" ]; then
+        local chrome_version=$(/opt/google/chrome/chrome --version 2>/dev/null | cut -d ' ' -f3)
+        print_success "Google Chrome instalado: ${chrome_version:-desconhecido}"
+    else
+        print_warning "Google Chrome não encontrado. Instalando..."
+        update_apt_if_needed
+
+        sudo apt install -y wget gpg 2>/dev/null || sudo apt install -y wget gnupg
+        if [ ! -f /usr/share/keyrings/google.gpg ]; then
+            curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google.gpg
+        fi
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list > /dev/null
+        sudo apt update -qq
+        sudo apt install -y google-chrome-stable
+
+        if [ -x "/opt/google/chrome/chrome" ]; then
+            print_success "Google Chrome instalado com sucesso"
+        else
+            print_error "Falha ao instalar o Google Chrome. Verifique a saída acima."
+            exit 1
+        fi
+    fi
+
     # Verificar Docker Compose standalone (docker-compose)
     if command -v docker-compose &> /dev/null; then
         has_compose_standalone=true
