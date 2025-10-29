@@ -267,15 +267,42 @@ check_dependencies() {
         print_success "pip instalado"
     fi
 
-    # Verificar python3-venv
-    print_step "Verificando python3-venv..."
-    if python3 -m venv --help &> /dev/null; then
-        print_success "python3-venv instalado"
+    # ═══════════════════════════════════════════════════════════════
+    # PYTHON3-VENV (versão específica para a versão do Python)
+    # ═══════════════════════════════════════════════════════════════
+    print_step "Verificando python3-venv (versão específica)..."
+
+    PYTHON_VERSION=$(python3 --version 2>/dev/null | cut -d' ' -f2)
+    if [ -z "$PYTHON_VERSION" ]; then
+        print_error "Python 3 não está instalado corretamente"
+        exit 1
+    fi
+
+    PYTHON_MAJOR_MINOR=$(echo "$PYTHON_VERSION" | cut -d'.' -f1,2)
+    VENV_PACKAGE="python${PYTHON_MAJOR_MINOR}-venv"
+
+    if python3 -m venv --help >/dev/null 2>&1; then
+        print_success "Ambiente virtual suportado (via $VENV_PACKAGE ou equivalente)"
     else
-        print_warning "python3-venv não encontrado. Instalando..."
+        print_warning "Suporte a 'venv' não disponível. Instalando $VENV_PACKAGE..."
         update_apt_if_needed
-        sudo apt install -y python3-venv
-        print_success "python3-venv instalado"
+
+        if sudo apt install -y "$VENV_PACKAGE"; then
+            print_success "$VENV_PACKAGE instalado com sucesso"
+        else
+            print_warning "Falha ao instalar $VENV_PACKAGE. Tentando python3-venv..."
+            if sudo apt install -y python3-venv; then
+                print_success "python3-venv instalado como fallback"
+            else
+                print_error "Falha crítica: não foi possível instalar suporte a 'venv'"
+                exit 1
+            fi
+        fi
+
+        if ! python3 -m venv --help >/dev/null 2>&1; then
+            print_error "Mesmo após instalação, 'python3 -m venv' não está funcional"
+            exit 1
+        fi
     fi
 
     # ═══════════════════════════════════════════════════════════════
