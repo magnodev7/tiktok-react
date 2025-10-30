@@ -652,20 +652,30 @@ async def complete_reinstall(
     if not build_result["success"]:
         errors.append("Falha no build do frontend")
 
-    # 4. Reiniciar serviços
+    # 4. Reiniciar serviços (com sudo)
     logger.info("Reiniciando serviços...")
     restart_result = _run_command(
-        ["bash", str(MANAGE_SH), "all", "restart"],
+        ["sudo", "bash", str(MANAGE_SH), "all", "restart"],
         timeout=60
     )
+
+    # Se sudo falhou, tentar sem sudo
+    if not restart_result["success"] and "sudo" in restart_result["stderr"].lower():
+        logger.warning("Sudo falhou, tentando sem sudo...")
+        restart_result = _run_command(
+            ["bash", str(MANAGE_SH), "all", "restart"],
+            timeout=60
+        )
+
     steps.append({
         "step": "restart_services",
         "success": restart_result["success"],
         "output": restart_result["stdout"],
+        "message": "Serviços reiniciados" if restart_result["success"] else "Falha ao reiniciar - pode precisar de sudo",
     })
 
     if not restart_result["success"]:
-        errors.append("Falha ao reiniciar serviços")
+        errors.append("Falha ao reiniciar serviços - você pode precisar reiniciar manualmente")
 
     completed = len(errors) == 0
     message = "Reinstalação completa concluída" if completed else "Reinstalação completada com erros"
