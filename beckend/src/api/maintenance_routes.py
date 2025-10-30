@@ -41,6 +41,12 @@ class GitConfigRequest(BaseModel):
     remote_name: str = "origin"
 
 
+class GitCheckoutRequest(BaseModel):
+    branch: str
+    force: bool = False
+    fetch: bool = True
+
+
 def _run_command(cmd: List[str], cwd: Optional[Path] = None, timeout: int = 300) -> dict:
     """Executa comando e retorna resultado."""
     try:
@@ -81,6 +87,29 @@ def _check_admin(user: UserModel) -> None:
             error="admin_required",
             message="Somente administradores podem acessar esta funcionalidade"
         )
+
+
+def _parse_branch_list(raw: str) -> List[dict]:
+    branches: List[dict] = []
+    for line in raw.strip().splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("|")
+        if len(parts) < 4:
+            # Espera formato: name|commit|date|subject
+            name = parts[0].strip()
+            commit = parts[1].strip() if len(parts) > 1 else ""
+            date = parts[2].strip() if len(parts) > 2 else ""
+            subject = parts[3].strip() if len(parts) > 3 else ""
+        else:
+            name, commit, date, subject = [p.strip() for p in parts[:4]]
+        branches.append({
+            "name": name,
+            "commit": commit,
+            "date": date,
+            "subject": subject,
+        })
+    return branches
 
 
 def _run_manage_command(action_args: List[str], timeout: int = 60) -> Tuple[dict, bool]:
@@ -323,6 +352,67 @@ async def get_git_log(
     return success_response(data={"commits": commits})
 
 
+@router.get("/git/branches", response_model=APIResponse[dict])
+async def list_git_branches(
+    refresh: bool = False,
+    current_user: UserModel = Depends(get_current_active_user),
+) -> APIResponse[dict]:
+    """Lista branches locais e remotos disponíveis."""
+    _check_admin(current_user)
+
+    steps = []
+
+    if refresh:
+        fetch = _run_command(["git", "fetch", "--all", "--prune"], timeout=120)
+        steps.append({
+            "step": "git_fetch",
+            "success": fetch["success"],
+            "output": fetch["stdout"],
+            "error": fetch["stderr"] if not fetch["success"] else None,
+        })
+        if not fetch["success"]:
+            return success_response(
+                message="Falha ao atualizar branches",
+                data={"steps": steps, "branches": None, "completed": False}
+            )
+
+    current_branch_cmd = _run_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=5)
+    current_branch = current_branch_cmd["stdout"].strip() if current_branch_cmd["success"] else "unknown"
+
+    local_cmd = _run_command(
+        [
+            "git",
+            "for-each-ref",
+            "--format=%(refname:short)|%(objectname:short)|%(committerdate:iso8601)|%(subject)",
+            "refs/heads",
+        ],
+        timeout=10,
+    )
+    remote_cmd = _run_command(
+        [
+            "git",
+            "for-each-ref",
+            "--format=%(refname:short)|%(objectname:short)|%(committerdate:iso8601)|%(subject)",
+            "refs/remotes",
+        ],
+        timeout=10,
+    )
+
+    locals_list = _parse_branch_list(local_cmd["stdout"]) if local_cmd["success"] else []
+    remotes_list = [
+        item for item in _parse_branch_list(remote_cmd["stdout"]) if not item["name"].endswith("/HEAD")
+    ] if remote_cmd["success"] else []
+
+    return success_response(
+        data={
+            "current_branch": current_branch,
+            "locals": locals_list,
+            "remotes": remotes_list,
+            "steps": steps,
+        }
+    )
+
+
 @router.get("/git/config", response_model=APIResponse[dict])
 async def get_git_config(
     current_user: UserModel = Depends(get_current_active_user),
@@ -399,6 +489,116 @@ async def update_git_config(
         data={
             "remote_name": config.remote_name,
             "remote_url": config.remote_url,
+        }
+    )
+
+
+@router.post("/git/checkout", response_model=APIResponse[dict])
+async def checkout_branch(
+    request: GitCheckoutRequest,
+    current_user: UserModel = Depends(get_current_active_user),
+) -> APIResponse[dict]:
+    """Altera o branch do repositório local."""
+    _check_admin(current_user)
+
+    target_branch = request.branch.strip()
+    if not target_branch:
+        raise_http_error(
+            status.HTTP_400_BAD_REQUEST,
+            error="invalid_branch",
+            message="Informe o nome do branch que deseja utilizar."
+        )
+
+    steps = []
+    errors = []
+
+    status_result = _run_command(["git", "status", "--porcelain"], timeout=10)
+    working_tree_dirty = status_result["success"] and status_result["stdout"].strip()
+
+    if working_tree_dirty and not request.force:
+        raise_http_error(
+            status.HTTP_409_CONFLICT,
+            error="uncommitted_changes",
+            message="Há alterações locais não commitadas. Use force=true para permitir o checkout com stash automático."
+        )
+
+    if working_tree_dirty:
+        stash = _run_command(["git", "stash"], timeout=30)
+        steps.append({
+            "step": "git_stash",
+            "success": stash["success"],
+            "output": stash["stdout"],
+            "error": stash["stderr"] if not stash["success"] else None,
+        })
+        if not stash["success"]:
+            errors.append("Falha ao executar git stash")
+            return success_response(
+                message="Checkout cancelado",
+                data={"steps": steps, "errors": errors, "completed": False}
+            )
+
+    if request.fetch:
+        fetch = _run_command(["git", "fetch", "--all", "--prune"], timeout=120)
+        steps.append({
+            "step": "git_fetch",
+            "success": fetch["success"],
+            "output": fetch["stdout"],
+            "error": fetch["stderr"] if not fetch["success"] else None,
+        })
+        if not fetch["success"]:
+            errors.append("Falha ao atualizar referências remotas")
+            return success_response(
+                message="Checkout cancelado",
+                data={"steps": steps, "errors": errors, "completed": False}
+            )
+
+    checkout = _run_command(["git", "checkout", target_branch], timeout=60)
+    steps.append({
+        "step": "git_checkout",
+        "success": checkout["success"],
+        "output": checkout["stdout"],
+        "error": checkout["stderr"] if not checkout["success"] else None,
+    })
+
+    if not checkout["success"]:
+        # Tenta criar branch local acompanhando remoto
+        remote_branch = target_branch if "/" in target_branch else f"origin/{target_branch}"
+        local_branch = target_branch.split("/", 1)[1] if "/" in target_branch else target_branch
+        create = _run_command(
+            ["git", "checkout", "-b", local_branch, remote_branch],
+            timeout=60
+        )
+        steps.append({
+            "step": "git_checkout_track",
+            "success": create["success"],
+            "output": create["stdout"],
+            "error": create["stderr"] if not create["success"] else None,
+        })
+        if not create["success"]:
+            errors.append(f"Não foi possível trocar para o branch '{target_branch}'")
+            return success_response(
+                message="Checkout falhou",
+                data={"steps": steps, "errors": errors, "completed": False}
+            )
+
+    current_branch_cmd = _run_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=5)
+    current_branch = current_branch_cmd["stdout"].strip() if current_branch_cmd["success"] else "unknown"
+
+    status_after = _run_command(["git", "status", "--short"], timeout=10)
+
+    steps.append({
+        "step": "git_status",
+        "success": status_after["success"],
+        "output": status_after["stdout"],
+    })
+
+    return success_response(
+        message=f"Branch ativo: {current_branch}",
+        data={
+            "steps": steps,
+            "errors": errors,
+            "completed": True,
+            "current_branch": current_branch,
         }
     )
 
