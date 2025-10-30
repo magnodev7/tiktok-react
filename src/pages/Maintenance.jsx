@@ -214,7 +214,7 @@ export default function Maintenance() {
   const handleUpdate = async (force = false) => {
     const confirmMessage = force
       ? '⚠️ ATENÇÃO: Mudanças locais serão DESCARTADAS!\n\nDeseja continuar?'
-      : '🔄 Atualizar o sistema do GitHub?\n\nIsso vai:\n- Fazer git pull\n- Detectar mudanças\n- Buildar frontend (se necessário)\n- Reiniciar backend (se necessário)';
+      : '🔄 Atualizar o sistema do GitHub?\n\nIsso vai:\n- Fazer git pull\n- Detectar mudanças\n- Buildar frontend (se necessário)\n- Reiniciar backend (se necessário)\n\n✅ Seus dados (vídeos, contas, etc) serão MANTIDOS';
 
     if (!confirm(confirmMessage)) {
       return;
@@ -257,6 +257,70 @@ export default function Maintenance() {
       }
 
       alert(`❌ Erro na atualização: ${message}`);
+      setUpdateLog([{ step: 'error', success: false, error: message }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCompleteReinstall = async () => {
+    const confirmed = confirm(
+      '🔥 REINSTALAÇÃO COMPLETA\n\n' +
+      '⚠️ ATENÇÃO: Esta ação é IRREVERSÍVEL!\n\n' +
+      'Todos os seus dados serão APAGADOS:\n' +
+      '❌ Vídeos agendados\n' +
+      '❌ Contas TikTok\n' +
+      '❌ Perfis do Chrome\n' +
+      '❌ Histórico de posts\n' +
+      '❌ Configurações\n\n' +
+      'Digite "CONFIRMAR" para prosseguir:'
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    const doubleCheck = prompt(
+      '🚨 ÚLTIMA CONFIRMAÇÃO\n\n' +
+      'Digite exatamente: APAGAR TUDO\n\n' +
+      'Isso vai DELETAR permanentemente todos os dados!'
+    );
+
+    if (doubleCheck !== 'APAGAR TUDO') {
+      alert('❌ Reinstalação cancelada. Texto não corresponde.');
+      return;
+    }
+
+    setLoading(true);
+    setUpdateLog([]);
+    setActiveTab('update');
+
+    try {
+      const response = await api.post('/api/maintenance/reinstall');
+
+      const data = response.data?.data || response.data;
+      setUpdateLog(data.steps || []);
+
+      if (data.completed || response.data?.success) {
+        alert(
+          '✅ Reinstalação completa concluída!\n\n' +
+          'O sistema foi resetado. Você pode precisar:\n' +
+          '1. Fazer login novamente\n' +
+          '2. Reconfigurar contas TikTok\n' +
+          '3. Reagendar vídeos'
+        );
+
+        // Recarregar página após 2 segundos
+        setTimeout(() => {
+          window.location.href = '/login';
+        }, 2000);
+      } else {
+        alert(`⚠️ Reinstalação completada com erros:\n${data.errors?.join('\n') || 'Erro desconhecido'}`);
+      }
+    } catch (error) {
+      console.error('[Maintenance] Reinstall error:', error);
+      const message = error.response?.data?.message || error.message;
+      alert(`❌ Erro na reinstalação: ${message}`);
       setUpdateLog([{ step: 'error', success: false, error: message }]);
     } finally {
       setLoading(false);
@@ -648,17 +712,18 @@ export default function Maintenance() {
       {/* Update Tab */}
       {activeTab === 'update' && (
         <div className="space-y-6">
-          <Card title="Atualizar Sistema do GitHub">
-            <div className="mb-6">
-              <p className="text-gray-600 dark:text-gray-400 mb-4">
-                Esta ferramenta atualiza o sistema automaticamente:
+          {/* Atualização do Sistema */}
+          <Card title="🔄 Atualizar Sistema (Recomendado)">
+            <div className="mb-4">
+              <p className="text-gray-600 dark:text-gray-400 mb-3">
+                Atualiza o código do sistema mantendo seus dados:
               </p>
-              <ul className="list-disc list-inside space-y-1 text-sm text-gray-600 dark:text-gray-400 mb-6">
-                <li>Faz git pull do repositório</li>
-                <li>Detecta arquivos alterados (frontend/backend)</li>
-                <li>Executa npm run build se o frontend mudou</li>
-                <li>Reinicia serviços se o backend mudou</li>
-                <li>Instala dependências se necessário</li>
+              <ul className="list-disc list-inside space-y-1 text-sm text-gray-600 dark:text-gray-400 mb-4">
+                <li>✅ Atualiza código (frontend/backend)</li>
+                <li>✅ Mantém vídeos agendados</li>
+                <li>✅ Mantém contas TikTok</li>
+                <li>✅ Mantém configurações</li>
+                <li>✅ Mantém histórico de posts</li>
               </ul>
 
               <div className="flex gap-3">
@@ -668,19 +733,60 @@ export default function Maintenance() {
                   className="bg-blue-600 hover:bg-blue-700"
                 >
                   <Download className="w-4 h-4 mr-2" />
-                  {loading ? 'Atualizando...' : 'Atualizar Agora'}
+                  {loading ? 'Atualizando...' : 'Atualizar Sistema'}
                 </Button>
 
                 <Button
                   onClick={() => handleUpdate(true)}
                   disabled={loading}
-                  className="bg-red-600 hover:bg-red-700"
+                  variant="outline"
+                  className="border-orange-500 text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20"
                 >
                   <AlertCircle className="w-4 h-4 mr-2" />
-                  Forçar Atualização
+                  Forçar (se houver conflitos)
                 </Button>
               </div>
             </div>
+          </Card>
+
+          {/* Atualização Completa */}
+          <Card title="🔥 Atualização Completa (Avançado)">
+            <div className="bg-red-50 dark:bg-red-900/20 border-2 border-red-300 dark:border-red-800 rounded-lg p-4 mb-4">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="w-6 h-6 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold text-red-800 dark:text-red-200 mb-2">
+                    ⚠️ ATENÇÃO: Esta ação é IRREVERSÍVEL!
+                  </p>
+                  <p className="text-sm text-red-700 dark:text-red-300 mb-2">
+                    Esta opção vai APAGAR todos os seus dados:
+                  </p>
+                  <ul className="list-disc list-inside space-y-1 text-sm text-red-700 dark:text-red-300">
+                    <li>❌ Vídeos agendados serão DELETADOS</li>
+                    <li>❌ Contas TikTok serão REMOVIDAS</li>
+                    <li>❌ Perfis do Chrome serão LIMPOS</li>
+                    <li>❌ Histórico de posts será APAGADO</li>
+                    <li>❌ Configurações serão RESETADAS</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            <div className="mb-4">
+              <p className="text-gray-600 dark:text-gray-400 mb-3">
+                Use apenas se quiser começar do zero ou resolver problemas graves.
+              </p>
+            </div>
+
+            <Button
+              onClick={() => handleCompleteReinstall()}
+              disabled={loading}
+              className="bg-red-600 hover:bg-red-700"
+            >
+              <AlertCircle className="w-4 h-4 mr-2" />
+              {loading ? 'Reinstalando...' : 'Reinstalar Completamente'}
+            </Button>
+          </Card>
 
             {updateLog.length > 0 && (
               <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg">

@@ -566,3 +566,117 @@ async def tail_logs(
             error="log_read_failed",
             message=str(e)
         )
+
+
+@router.post("/reinstall", response_model=APIResponse[dict])
+async def complete_reinstall(
+    current_user: UserModel = Depends(get_current_active_user),
+) -> APIResponse[dict]:
+    """
+    Reinstalação completa do sistema:
+    - Atualiza código do GitHub
+    - LIMPA todos os dados do usuário
+    - Reinicia serviços
+    """
+    _check_admin(current_user)
+
+    logger.warning(f"User {current_user.username} iniciando REINSTALAÇÃO COMPLETA - TODOS OS DADOS SERÃO APAGADOS!")
+
+    steps = []
+    errors = []
+
+    # 1. Git stash + pull
+    logger.info("Limpando mudanças locais...")
+    stash_result = _run_command(["git", "stash"], cwd=PROJECT_ROOT, timeout=30)
+    steps.append({
+        "step": "git_stash",
+        "success": True,
+        "message": "Mudanças locais guardadas"
+    })
+
+    pull_result = _run_command(["git", "pull", "origin"], cwd=PROJECT_ROOT, timeout=120)
+    steps.append({
+        "step": "git_pull",
+        "success": pull_result["success"],
+        "output": pull_result["stdout"],
+        "error": pull_result["stderr"] if not pull_result["success"] else None,
+    })
+
+    if not pull_result["success"]:
+        errors.append("Falha no git pull")
+
+    # 2. LIMPAR DADOS DO USUÁRIO
+    logger.warning("LIMPANDO TODOS OS DADOS DO USUÁRIO...")
+
+    import shutil
+
+    # Limpar vídeos
+    videos_dir = PROJECT_ROOT / "videos"
+    if videos_dir.exists():
+        shutil.rmtree(videos_dir, ignore_errors=True)
+        videos_dir.mkdir(parents=True, exist_ok=True)
+        steps.append({"step": "clean_videos", "success": True, "message": "Vídeos apagados"})
+
+    # Limpar posted
+    posted_dir = PROJECT_ROOT / "posted"
+    if posted_dir.exists():
+        shutil.rmtree(posted_dir, ignore_errors=True)
+        posted_dir.mkdir(parents=True, exist_ok=True)
+        steps.append({"step": "clean_posted", "success": True, "message": "Histórico de posts apagado"})
+
+    # Limpar profiles (Chrome)
+    profiles_dir = PROJECT_ROOT / "profiles"
+    if profiles_dir.exists():
+        shutil.rmtree(profiles_dir, ignore_errors=True)
+        profiles_dir.mkdir(parents=True, exist_ok=True)
+        steps.append({"step": "clean_profiles", "success": True, "message": "Perfis do Chrome apagados"})
+
+    # Limpar state
+    state_dir = PROJECT_ROOT / "state"
+    if state_dir.exists():
+        # Manter estrutura mas limpar conteúdo
+        for item in state_dir.glob("*"):
+            if item.is_file():
+                item.unlink()
+        steps.append({"step": "clean_state", "success": True, "message": "Arquivos de estado limpos"})
+
+    # 3. Build do frontend
+    logger.info("Fazendo build do frontend...")
+    build_result = _run_command(["npm", "run", "build"], cwd=PROJECT_ROOT, timeout=300)
+    steps.append({
+        "step": "frontend_build",
+        "success": build_result["success"],
+        "output": build_result["stdout"][-500:] if build_result["stdout"] else "",
+    })
+
+    if not build_result["success"]:
+        errors.append("Falha no build do frontend")
+
+    # 4. Reiniciar serviços
+    logger.info("Reiniciando serviços...")
+    restart_result = _run_command(
+        ["bash", str(MANAGE_SH), "all", "restart"],
+        timeout=60
+    )
+    steps.append({
+        "step": "restart_services",
+        "success": restart_result["success"],
+        "output": restart_result["stdout"],
+    })
+
+    if not restart_result["success"]:
+        errors.append("Falha ao reiniciar serviços")
+
+    completed = len(errors) == 0
+    message = "Reinstalação completa concluída" if completed else "Reinstalação completada com erros"
+
+    logger.info(f"Reinstalação completa finalizada. Sucesso: {completed}")
+
+    return success_response(
+        message=message,
+        data={
+            "steps": steps,
+            "errors": errors,
+            "completed": completed,
+        }
+    )
