@@ -80,10 +80,20 @@ export default function Maintenance() {
     try {
       const response = await api.get('/api/maintenance/service/status');
       console.log('[Maintenance] Service status response:', response.data);
-      if (response.data?.success) {
+
+      // O backend pode retornar de 2 formas:
+      // 1. {success: true, data: {services: {...}}}
+      // 2. Diretamente: {services: {...}, timestamp: '...'}
+
+      if (response.data?.success === true) {
+        // Formato com wrapper
         setServiceStatus(response.data.data);
+      } else if (response.data?.services) {
+        // Formato direto (FastAPI serialização)
+        setServiceStatus(response.data);
       } else {
-        console.error('[Maintenance] Service status failed:', response.data);
+        console.error('[Maintenance] Service status - formato inválido:', response.data);
+        setServiceStatus({ services: {}, error: 'Formato de resposta inválido' });
       }
     } catch (error) {
       console.error('Erro ao carregar status dos serviços:', error);
@@ -94,8 +104,13 @@ export default function Maintenance() {
   const loadGitStatus = async () => {
     try {
       const response = await api.get('/api/maintenance/git/status');
-      if (response.data?.success) {
+      console.log('[Maintenance] Git status response:', response.data);
+
+      if (response.data?.success === true) {
         setGitStatus(response.data.data);
+      } else if (response.data?.branch) {
+        // Formato direto
+        setGitStatus(response.data);
       }
     } catch (error) {
       console.error('Erro ao carregar status do git:', error);
@@ -105,8 +120,13 @@ export default function Maintenance() {
   const loadGitLog = async () => {
     try {
       const response = await api.get('/api/maintenance/git/log?limit=10');
-      if (response.data?.success) {
-        setGitLog(response.data.data.commits || []);
+      console.log('[Maintenance] Git log response:', response.data);
+
+      if (response.data?.success === true) {
+        setGitLog(response.data.data?.commits || []);
+      } else if (response.data?.commits) {
+        // Formato direto
+        setGitLog(response.data.commits);
       }
     } catch (error) {
       console.error('Erro ao carregar log do git:', error);
@@ -116,9 +136,13 @@ export default function Maintenance() {
   const loadGitConfig = async () => {
     try {
       const response = await api.get('/api/maintenance/git/config');
-      if (response.data?.success) {
-        setGitConfig(response.data.data);
-        setNewGitUrl(response.data.data.remotes?.origin || '');
+      console.log('[Maintenance] Git config response:', response.data);
+
+      const configData = response.data?.success === true ? response.data.data : response.data;
+
+      if (configData) {
+        setGitConfig(configData);
+        setNewGitUrl(configData.remotes?.origin || '');
       }
     } catch (error) {
       console.error('Erro ao carregar configuração do git:', error);
@@ -159,9 +183,10 @@ export default function Maintenance() {
   const loadLogs = async () => {
     try {
       const response = await api.get(`/api/maintenance/logs/tail?service=${selectedLogService}&lines=100`);
-      if (response.data?.success) {
-        setLogs(response.data.data.logs || '');
-      }
+      console.log('[Maintenance] Logs response:', response.data);
+
+      const logsData = response.data?.success === true ? response.data.data : response.data;
+      setLogs(logsData?.logs || '');
     } catch (error) {
       console.error('Erro ao carregar logs:', error);
       setLogs('Erro ao carregar logs');
