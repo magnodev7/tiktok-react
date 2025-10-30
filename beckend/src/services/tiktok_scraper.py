@@ -442,9 +442,16 @@ class TikTokScraper:
             return None, None
 
         storage = AccountStorage()
-        cookies_data = storage.get_latest_cookies(account_name)
-        if not cookies_data:
+        auth_bundle = storage.get_latest_cookies(account_name)
+        if not auth_bundle:
             return None, None
+
+        cookies_data: Any = auth_bundle
+        local_storage_data: Dict[str, Any] = {}
+
+        if isinstance(auth_bundle, dict):
+            cookies_data = auth_bundle.get("cookies", {})
+            local_storage_data = auth_bundle.get("local_storage") or {}
 
         jar = RequestsCookieJar()
         ms_token = None
@@ -484,6 +491,11 @@ class TikTokScraper:
                         ms_token = str(value)
             except Exception:
                 return None, None
+
+        if not ms_token and isinstance(local_storage_data, dict):
+            candidate = local_storage_data.get("msToken") or local_storage_data.get("msToken_v2")
+            if candidate:
+                ms_token = str(candidate)
 
         return jar, ms_token
 

@@ -2,7 +2,7 @@ import json
 import time
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any, Iterable, List
+from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
 
 from selenium.webdriver.remote.webdriver import WebDriver
@@ -137,6 +137,79 @@ def _flatten_cookie_collection(raw: Any) -> List[Dict[str, Any]]:
     return flat
 
 
+def _apply_web_storage(driver: WebDriver, storage_map: Dict[str, str], storage_kind: str) -> None:
+    """Restaura localStorage/sessionStorage a partir dos valores persistidos."""
+    if not storage_map:
+        return
+
+    try:
+        driver.execute_script(
+            """
+            const data = arguments[0];
+            const storageName = arguments[1];
+            const storage = window[storageName];
+            if (!storage) {
+                return;
+            }
+            try {
+                storage.clear();
+            } catch (err) {
+                // Pode falhar em contextos restritos; ignora
+            }
+            for (const [key, value] of Object.entries(data)) {
+                if (typeof key !== "string") {
+                    continue;
+                }
+                try {
+                    storage.setItem(key, value ?? "");
+                } catch (err) {
+                    // Ignora chaves que não podem ser persistidas
+                }
+            }
+            """,
+            storage_map,
+            storage_kind,
+        )
+        logger.info("📦 %s restaurado (%d itens)", storage_kind, len(storage_map))
+        print(f"📦 {storage_kind} restaurado ({len(storage_map)} itens)")
+    except Exception as exc:
+        logger.debug("Falha ao restaurar %s: %s", storage_kind, exc)
+
+
+def _dump_web_storage(driver: WebDriver, storage_kind: str) -> Dict[str, str]:
+    """Captura conteúdo de localStorage/sessionStorage."""
+    try:
+        data = driver.execute_script(
+            """
+            const storageName = arguments[0];
+            const storage = window[storageName];
+            if (!storage) {
+                return {};
+            }
+            const out = {};
+            for (let i = 0; i < storage.length; i += 1) {
+                const key = storage.key(i);
+                if (key === null) {
+                    continue;
+                }
+                out[key] = storage.getItem(key);
+            }
+            return out;
+            """,
+            storage_kind,
+        )
+        if isinstance(data, dict):
+            normalized = {}
+            for key, value in data.items():
+                if key is None:
+                    continue
+                normalized[str(key)] = "" if value is None else str(value)
+            return normalized
+    except Exception as exc:
+        logger.debug("Falha ao capturar %s: %s", storage_kind, exc)
+    return {}
+
+
 def _set_cookie_via_cdp(driver: WebDriver, cookie: Dict[str, Any], base_url: str) -> bool:
     """Fallback para injetar cookies via CDP quando add_cookie falha."""
     try:
@@ -230,12 +303,25 @@ def load_cookies_for_account(
     print(f"🔍 Tentando carregar cookies para conta: {account_name}")
 
     storage = AccountStorage()
-    cookies_data = storage.get_latest_cookies(account_name)
+    auth_bundle = storage.get_latest_cookies(account_name)
 
-    if not cookies_data:
+    if not auth_bundle:
         logger.error(f"❌ Cookies não encontrados para conta: {account_name}")
         print(f"❌ Cookies não encontrados para conta: {account_name}")
         return False
+
+    local_storage_data: Dict[str, str] = {}
+    session_storage_data: Dict[str, str] = {}
+    cookies_payload: Any = auth_bundle
+
+    if isinstance(auth_bundle, dict):
+        local_storage_data = auth_bundle.get("local_storage") or {}
+        session_storage_data = auth_bundle.get("session_storage") or {}
+        cookies_payload = auth_bundle.get("cookies", auth_bundle)
+    elif isinstance(auth_bundle, list):
+        cookies_payload = auth_bundle
+    else:
+        cookies_payload = auth_bundle
 
     # Tenta navegar para o TikTok
     initial_timeout = False
@@ -269,6 +355,11 @@ def load_cookies_for_account(
             driver.delete_all_cookies()
         except Exception:
             pass
+
+        if local_storage_data:
+            _apply_web_storage(driver, local_storage_data, "localStorage")
+        if session_storage_data:
+            _apply_web_storage(driver, session_storage_data, "sessionStorage")
 
         # Executa scripts anti-detecção APÓS navegar para TikTok
         logger.info("🛡️ Aplicando scripts anti-detecção...")
@@ -312,14 +403,14 @@ def load_cookies_for_account(
 
     # Parse cookies
     cookies_list: List[Dict[str, Any]] = []
-    if isinstance(cookies_data, dict) and "cookies" in cookies_data:
-        cookies_list = _flatten_cookie_collection(cookies_data["cookies"])
-    elif isinstance(cookies_data, list):
-        cookies_list = _flatten_cookie_collection(cookies_data)
-    elif isinstance(cookies_data, dict):
+    if isinstance(cookies_payload, dict) and "cookies" in cookies_payload:
+        cookies_list = _flatten_cookie_collection(cookies_payload["cookies"])
+    elif isinstance(cookies_payload, list):
+        cookies_list = _flatten_cookie_collection(cookies_payload)
+    elif isinstance(cookies_payload, dict):
         cookies_list = [
             {"name": name, "value": str(value), "domain": ".tiktok.com"}
-            for name, value in cookies_data.items()
+            for name, value in cookies_payload.items()
         ]
 
     if not cookies_list:
@@ -442,8 +533,19 @@ def save_cookies_for_account(driver: WebDriver, account_name: str) -> Optional[P
 
     try:
         cookies = driver.get_cookies()
+        local_storage = _dump_web_storage(driver, "localStorage")
+        session_storage = _dump_web_storage(driver, "sessionStorage")
+
+        payload: Dict[str, Any] = {
+            "cookies": cookies,
+        }
+        if local_storage:
+            payload["local_storage"] = local_storage
+        if session_storage:
+            payload["session_storage"] = session_storage
+
         storage = AccountStorage()
-        cookies_path = storage.save_cookies(account_name, cookies)
+        cookies_path = storage.save_cookies(account_name, payload)
         print(f"✅ Cookies salvos para conta '{account_name}': {cookies_path}")
         return cookies_path
     except Exception as e:

@@ -251,8 +251,13 @@ async def update_account_cookies(
 
     # Valida formato dos cookies
     cookies_list = None
+    local_storage_data: Optional[Dict[str, Any]] = None
+    session_storage_data: Optional[Dict[str, Any]] = None
+
     if isinstance(cookies_data, dict) and "cookies" in cookies_data:
         cookies_list = cookies_data["cookies"]
+        local_storage_data = cookies_data.get("local_storage")
+        session_storage_data = cookies_data.get("session_storage")
     elif isinstance(cookies_data, list):
         cookies_list = cookies_data
     else:
@@ -284,8 +289,31 @@ async def update_account_cookies(
                 message=f"Cookie na posição {idx} não possui 'name' ou 'value'"
             )
 
+    def _validate_storage(storage: Optional[Dict[str, Any]], storage_name: str) -> Optional[Dict[str, Any]]:
+        if storage is None:
+            return None
+        if not isinstance(storage, dict):
+            raise_http_error(
+                status.HTTP_400_BAD_REQUEST,
+                error="invalid_storage_format",
+                message=f"{storage_name} deve ser um objeto com chaves/valores"
+            )
+        sanitized = {}
+        for key, value in storage.items():
+            if key is None:
+                continue
+            sanitized[str(key)] = "" if value is None else str(value)
+        return sanitized
+
+    local_storage_sanitized = _validate_storage(local_storage_data, "local_storage")
+    session_storage_sanitized = _validate_storage(session_storage_data, "session_storage")
+
     # Prepara dados para salvar (garante que está no formato correto)
     cookies_to_save = {"cookies": cookies_list}
+    if local_storage_sanitized:
+        cookies_to_save["local_storage"] = local_storage_sanitized
+    if session_storage_sanitized:
+        cookies_to_save["session_storage"] = session_storage_sanitized
 
     # Atualiza cookies no banco
     success = TikTokAccountRepository.update(
@@ -309,5 +337,9 @@ async def update_account_cookies(
 
     return success_response(
         message=f"Cookies atualizados com sucesso para '{account.account_name}' ({len(cookies_list)} cookies)",
-        data={"cookies_count": len(cookies_list)}
+        data={
+            "cookies_count": len(cookies_list),
+            "local_storage_items": len(local_storage_sanitized or {}),
+            "session_storage_items": len(session_storage_sanitized or {}),
+        }
     )

@@ -181,7 +181,31 @@ Criado em: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
 
         return structure
 
-    def save_cookies(self, account_name: str, cookies_data: Any) -> Path:
+    def _normalize_storage(self, storage_data: Any) -> Dict[str, str]:
+        """
+        Normaliza dados de storage do navegador (local/session) para dicionário de strings.
+        """
+        if not storage_data:
+            return {}
+
+        if isinstance(storage_data, dict):
+            normalized = {}
+            for key, value in storage_data.items():
+                if key is None:
+                    continue
+                normalized[str(key)] = "" if value is None else str(value)
+            return normalized
+
+        return {}
+
+    def save_cookies(
+        self,
+        account_name: str,
+        cookies_data: Any,
+        *,
+        local_storage: Optional[Dict[str, Any]] = None,
+        session_storage: Optional[Dict[str, Any]] = None,
+    ) -> Path:
         """
         Salva cookies da conta em arquivo JSON
 
@@ -192,6 +216,14 @@ Criado em: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
         Returns:
             Caminho do arquivo salvo
         """
+        # Suporta receber bundle com cookies + storages
+        bundle_local_storage = None
+        bundle_session_storage = None
+        if isinstance(cookies_data, dict) and "cookies" in cookies_data:
+            bundle_local_storage = cookies_data.get("local_storage")
+            bundle_session_storage = cookies_data.get("session_storage")
+            cookies_data = cookies_data.get("cookies")
+
         structure = self.get_account_structure(account_name)
         cookies_dir = structure["cookies"]
         cookies_dir.mkdir(parents=True, exist_ok=True)
@@ -206,19 +238,23 @@ Criado em: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
             except Exception:
                 pass
 
+        combined_local_storage = self._normalize_storage(local_storage or bundle_local_storage)
+        combined_session_storage = self._normalize_storage(session_storage or bundle_session_storage)
+
         cookies_file = cookies_dir / "cookies_latest.json"
 
         with open(cookies_file, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "account_name": account_name,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "cookies": normalized_cookies,
-                },
-                f,
-                indent=2,
-                ensure_ascii=False,
-            )
+            payload = {
+                "account_name": account_name,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "cookies": normalized_cookies,
+            }
+            if combined_local_storage:
+                payload["local_storage"] = combined_local_storage
+            if combined_session_storage:
+                payload["session_storage"] = combined_session_storage
+
+            json.dump(payload, f, indent=2, ensure_ascii=False)
 
         return cookies_file
 
@@ -241,10 +277,24 @@ Criado em: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
         try:
             with open(latest_link, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return data.get("cookies")
+                if isinstance(data, dict):
+                    return data
+                # Mantém compatibilidade com formatos antigos
+                return {"cookies": data}
         except Exception as e:
             print(f"Erro ao ler cookies de {account_name}: {e}")
             return None
+
+    def get_latest_cookies_only(self, account_name: str) -> Optional[Any]:
+        """
+        Retorna apenas a lista/dict de cookies para compatibilidade retroativa.
+        """
+        bundle = self.get_latest_cookies(account_name)
+        if not bundle:
+            return None
+        if isinstance(bundle, dict) and "cookies" in bundle:
+            return bundle.get("cookies")
+        return bundle
 
     def list_cookie_files(self, account_name: str) -> List[Path]:
         """
