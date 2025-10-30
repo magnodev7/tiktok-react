@@ -494,8 +494,10 @@ class TikTokUploader:
             if texts:
                 joined_lower = joined.lower()
                 if any(keyword.lower() in joined_lower for keyword in self.UPLOAD_FAILURE_KEYWORDS):
+                    self.log(f"❌ Status reportou falha no upload: {joined}")
                     return False
                 if any(keyword.lower() in joined_lower for keyword in self.UPLOAD_SUCCESS_KEYWORDS):
+                    self.log(f"✅ Upload marcado como concluído ({joined})")
                     return True
                 # Se o status indica progresso contínuo (ex.: "MB" ou "left"), estende temporizador
                 if any(token in joined_lower for token in ("mb/", "%", "left", "remaining", "duration")):
@@ -560,36 +562,116 @@ class TikTokUploader:
     # 3) Preencher descrição
     # -----------------------------
     def _fill_description(self, text: str):
-        # Sanitiza texto para remover caracteres fora do BMP
-        text = _sanitize_text_for_chrome(text)
+        """
+        Preenche campo de descrição com timeout e fallbacks robustos.
+        Se falhar completamente, continua sem travar (descrição é opcional).
+        """
+        try:
+            # Sanitiza texto para remover caracteres fora do BMP
+            text = _sanitize_text_for_chrome(text)
+            self.log(f"🔍 Buscando campo de descrição...")
 
-        # campo contenteditable no Studio
-        candidates = [
-            (By.CSS_SELECTOR, "div[contenteditable='true']"),
-            (By.XPATH, "//div[@contenteditable='true']"),
-            (By.CSS_SELECTOR, "textarea"),
-        ]
-        box = None
-        for loc in candidates:
+            # candidats atualizados para o campo de legenda/caption do Studio
+            candidates = [
+                (By.CSS_SELECTOR, "div[data-e2e='caption-editor'] div[contenteditable='true']"),
+                (By.CSS_SELECTOR, "div[data-e2e='caption'] div[contenteditable='true']"),
+                (By.CSS_SELECTOR, "div[contenteditable='true'][data-placeholder]"),
+                (By.XPATH, "//div[@contenteditable='true' and @role='textbox']"),
+                (By.CSS_SELECTOR, "textarea[data-e2e='caption-textarea']"),
+                (By.CSS_SELECTOR, "textarea"),
+            ]
+
+            box = None
+            for i, loc in enumerate(candidates, 1):
+                try:
+                    self.log(f"🔍 Tentando seletor {i}/{len(candidates)}...")
+                    candidate = WebDriverWait(self.driver, 8).until(
+                        EC.presence_of_element_located(loc)
+                    )
+                    if candidate and candidate.is_displayed():
+                        box = candidate
+                        self.log(f"✅ Campo encontrado (seletor {i})")
+                        break
+                except TimeoutException:
+                    continue
+                except Exception as e:
+                    self.log(f"⚠️ Erro no seletor {i}: {e}")
+                    continue
+
+            if not box:
+                self.log("⚠️ Não achei campo de descrição; prosseguindo sem descrição")
+                return
+
             try:
-                box = _visible(self.driver, loc, timeout=WAIT_SHORT)
-                if box: break
-            except TimeoutException:
-                continue
-        if box:
-            try:
-                self.driver.execute_script("arguments[0].innerHTML = '';", box)
-            except Exception:
+                # foco no campo para facilitar eventos
+                self.driver.execute_script("arguments[0].focus();", box)
+                self.log("🔍 Campo focado, preenchendo via JS...")
+
+                # Usa JS para preencher e disparar eventos React/Input
+                self.driver.execute_script(
+                    """
+                    const el = arguments[0];
+                    const value = arguments[1];
+                    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                        el.value = value;
+                        const inputEvt = new Event('input', { bubbles: true });
+                        const changeEvt = new Event('change', { bubbles: true });
+                        el.dispatchEvent(inputEvt);
+                        el.dispatchEvent(changeEvt);
+                    } else {
+                        el.innerText = value;
+                        const inputEvt = new InputEvent('input', { bubbles: true });
+                        el.dispatchEvent(inputEvt);
+                    }
+                    """,
+                    box,
+                    text,
+                )
+
+                # Como fallback, garante que o campo tem conteúdo
+                time.sleep(0.5)
+                if not box.text.strip():
+                    self.log("🔍 Campo vazio após JS, usando send_keys...")
+                    box.clear()
+                    box.send_keys(text)
+
+                self.log("📝 Descrição preenchida com sucesso")
+            except Exception as exc:
+                self.log(f"⚠️ Falha ao preencher descrição via JS: {exc}; tentando fallback")
                 try:
                     box.clear()
                 except Exception:
                     pass
-            for ch in text:
-                box.send_keys(ch)
-                time.sleep(0.01)
-            self.log("📝 Descrição preenchida")
-        else:
-            self.log("⚠️ Não achei campo de descrição; prosseguindo")
+
+                # Fallback: digitação lenta (com limite de tempo)
+                chars_written = 0
+                max_chars = min(len(text), 500)  # Limita para evitar travamento
+                for ch in text[:max_chars]:
+                    try:
+                        box.send_keys(ch)
+                        chars_written += 1
+                    except Exception as e:
+                        if chars_written > 10:
+                            # Se já escreveu algo, continua
+                            self.log(f"⚠️ Erro ao escrever caractere {chars_written}: {e}, continuando...")
+                            break
+                        time.sleep(0.05)
+                        try:
+                            box.send_keys(ch)
+                            chars_written += 1
+                        except:
+                            break
+                    time.sleep(0.003)
+
+                if chars_written > 0:
+                    self.log(f"📝 Descrição preenchida parcialmente ({chars_written} caracteres)")
+                else:
+                    self.log("⚠️ Não foi possível preencher descrição (continuando sem descrição)")
+
+        except Exception as outer_exc:
+            # Captura QUALQUER erro não tratado para evitar travamento
+            self.log(f"⚠️ Erro crítico ao preencher descrição: {outer_exc}")
+            self.log("⏭️ Continuando sem descrição para não travar a postagem")
 
     # -----------------------------
     # 4) Garantir audiência pública (sem abrir dropdown à toa)
@@ -902,18 +984,31 @@ class TikTokUploader:
             self.log("❌ Upload não pôde ser concluído após múltiplas tentativas.")
             return False
 
+        self.log(f"✏️ Preparando descrição (tamanho: {len(description)} caracteres)")
+
         # 3) descrição
-        self._fill_description(description)
+        try:
+            self._fill_description(description)
+            self.log("✅ Descrição tratada")
+        except Exception as desc_error:
+            self.log(f"⚠️ Erro ao processar descrição: {desc_error} (continuando)")
 
         # 4) audiência = Everyone (sem travar no select)
-        self._ensure_public_audience()
+        try:
+            self.log("🔧 Ajustando audiência para 'Everyone'")
+            self._ensure_public_audience()
+            self.log("✅ Audiência verificada")
+        except Exception as audience_error:
+            self.log(f"⚠️ Erro ao ajustar audiência: {audience_error} (continuando)")
 
         # 5) publicar
+        self.log("🚀 Tentando clicar em 'Publicar'")
         if not self._click_publish():
             stem = f"publish_not_found_{_now()}"
             h, p = _dump(self.driver, self.debug_dir, stem)
             self.log(f"🧪 Dump salvo: {h} / {p}")
             return False
+        self.log("✅ Solicitação de publicação enviada")
 
         # 6) lidar com popup “Continue to post?”
         if not self._handle_continue_dialog():
@@ -921,8 +1016,10 @@ class TikTokUploader:
             h, p = _dump(self.driver, self.debug_dir, stem)
             self.log(f"🧪 Dump salvo: {h} / {p}")
             return False
+        self.log("✅ Modal de confirmação tratado (se presente)")
 
         # 7) confirmar
+        self.log("⏳ Aguardando confirmação de publicação...")
         if self._confirm_posted():
             return True
 
