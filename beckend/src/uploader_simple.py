@@ -36,15 +36,27 @@ STUDIO_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
 CLASSIC_URL = "https://www.tiktok.com/upload"
 
 
-class TikTokUploaderSimple:
+class TikTokUploader:
     """
-    Uploader SIMPLES para TikTok.
+    Uploader SIMPLIFICADO para TikTok (versão compatível).
+    Mantém interface do sistema antigo mas com código simplificado.
     Faz apenas o essencial: upload → descrição → publicar
     """
 
-    def __init__(self, driver, logger=print):
+    def __init__(
+        self,
+        driver,
+        logger=None,
+        debug_dir=None,
+        cookies_path=None,
+        account_name=None,
+        reuse_existing_session=True,
+        **kwargs  # Ignora outros parâmetros para compatibilidade
+    ):
         self.driver = driver
-        self.log = logger
+        self.log = logger.info if logger and hasattr(logger, 'info') else (logger if logger else print)
+        self.account_name = account_name
+        # Ignora debug_dir, cookies_path, reuse_existing_session (compatibilidade)
 
     def _wait_element(self, by, value, timeout=WAIT_MED):
         """Espera elemento aparecer"""

@@ -71,7 +71,7 @@ def _build_chrome_options(headless: bool = True) -> Options:
     return opts
 
 
-def build_driver_simple(headless: bool = True) -> webdriver.Chrome:
+def build_driver(account_name: Optional[str] = None, profile_base_dir: Optional[str] = None, headless: bool = True) -> webdriver.Chrome:
     """
     Cria driver do Chrome de forma SIMPLES (como tiktok_bot).
 
@@ -191,4 +191,31 @@ def get_or_create_driver(
         except:
             pass
 
-    return build_driver_simple(headless=headless)
+    return build_driver(headless=headless)
+
+
+def get_fresh_driver(
+    existing: Optional[webdriver.Chrome] = None,
+    profile_base_dir: Optional[str] = None,
+    account_name: Optional[str] = None
+) -> webdriver.Chrome:
+    """
+    Compatibilidade com código antigo: sempre cria driver novo.
+
+    Args:
+        existing: Driver existente (será fechado se não for None)
+        profile_base_dir: Ignorado (para compatibilidade)
+        account_name: Ignorado (para compatibilidade)
+
+    Returns:
+        WebDriver novo
+    """
+    # Fecha driver antigo se existir
+    if existing is not None:
+        try:
+            existing.quit()
+        except:
+            pass
+
+    # Cria novo driver
+    return build_driver(account_name=account_name, profile_base_dir=profile_base_dir, headless=True)

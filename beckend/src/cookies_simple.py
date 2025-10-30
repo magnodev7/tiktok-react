@@ -22,7 +22,7 @@ from selenium.webdriver.support import expected_conditions as EC
 logger = logging.getLogger("cookies_simple")
 
 
-def load_cookies_simple(
+def load_cookies_for_account(
     driver: WebDriver,
     account_name: str,
     base_url: str = "https://www.tiktok.com"
@@ -142,7 +142,7 @@ def load_cookies_simple(
             return False
 
 
-def save_cookies_simple(driver: WebDriver, account_name: str) -> bool:
+def save_cookies_for_account(driver: WebDriver, account_name: str) -> bool:
     """
     Salva cookies de forma SIMPLES.
 
