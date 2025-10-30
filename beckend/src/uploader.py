@@ -497,6 +497,9 @@ class TikTokUploader:
                     return False
                 if any(keyword.lower() in joined_lower for keyword in self.UPLOAD_SUCCESS_KEYWORDS):
                     return True
+                # Se o status indica progresso contínuo (ex.: "MB" ou "left"), estende temporizador
+                if any(token in joined_lower for token in ("mb/", "%", "left", "remaining", "duration")):
+                    deadline = min(hard_deadline, time.time() + timeout)
 
             # Também verificamos toasts
             toasts = self._collect_toast_texts()
