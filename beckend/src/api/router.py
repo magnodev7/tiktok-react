@@ -10,6 +10,7 @@ from . import (
     analytics_routes,
     videos_routes,
     logs_routes,
+    maintenance_routes,
 )
 
 
@@ -22,5 +23,6 @@ def get_api_router() -> APIRouter:
     api_router.include_router(analytics_routes.router)
     api_router.include_router(videos_routes.router)
     api_router.include_router(logs_routes.router)
+    api_router.include_router(maintenance_routes.router)
 
     return api_router

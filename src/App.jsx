@@ -14,6 +14,7 @@ import Analytics from '@/pages/Analytics';
 import Settings from '@/pages/Settings';
 import Logs from '@/pages/Logs';
 import AccountGrowth from '@/pages/AccountGrowth';
+import Maintenance from '@/pages/Maintenance';
 import Spinner from '@/components/common/Spinner';
 import ToastInitializer from '@/components/common/ToastInitializer';
 import '@/styles/animations.css';
@@ -110,6 +111,7 @@ function App() {
                   <Route path="growth" element={<AccountGrowth />} />
                   <Route path="analytics" element={<Analytics />} />
                   <Route path="logs" element={<Logs />} />
+                  <Route path="maintenance" element={<Maintenance />} />
                   <Route path="settings" element={<Settings />} />
                 </Route>
 

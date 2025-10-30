@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { Home, Calendar, Users, BarChart3, Settings, FileText, ChevronLeft, ChevronRight, TrendingUp } from 'lucide-react';
+import { Home, Calendar, Users, BarChart3, Settings, FileText, ChevronLeft, ChevronRight, TrendingUp, Wrench } from 'lucide-react';
 import { useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import logomarca from '@/assets/logomarca.png';
@@ -12,6 +12,7 @@ const navItems = [
   { path: '/growth', icon: TrendingUp, label: 'Crescimento', shortcut: '⌘4' },
   { path: '/analytics', icon: BarChart3, label: 'Analytics', shortcut: '⌘5' },
   { path: '/logs', icon: FileText, label: 'Logs', shortcut: '⌘6' },
+  { path: '/maintenance', icon: Wrench, label: 'Manutenção', shortcut: '⌘M', adminOnly: true },
   { path: '/settings', icon: Settings, label: 'Configurações', shortcut: '⌘,' },
 ];
 
@@ -64,10 +65,12 @@ export default function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 overflow-y-auto p-3 space-y-1">
-        {navItems.map((item) => {
+        {navItems
+          .filter(item => !item.adminOnly || user?.is_admin)
+          .map((item) => {
           const Icon = item.icon;
           const isActive = location.pathname === item.path;
-          
+
           return (
             <Link
               key={item.path}
