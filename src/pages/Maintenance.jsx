@@ -70,8 +70,15 @@ export default function Maintenance() {
       loadGitStatus();
       loadGitLog();
       loadGitConfig();
+      loadBranches(false);
     }
   }, [activeTab]);
+
+  useEffect(() => {
+    if (!selectedBranch && gitStatus?.branch) {
+      setSelectedBranch(gitStatus.branch);
+    }
+  }, [gitStatus, selectedBranch]);
 
   // Carregar logs ao mudar de serviço
   useEffect(() => {
@@ -701,13 +708,107 @@ export default function Maintenance() {
             {gitStatus && (
               <div className="space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg">
-                    <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">
-                      Branch Atual:
-                    </h3>
-                    <p className="text-lg font-mono text-blue-600 dark:text-blue-400">
-                      {gitStatus.branch}
-                    </p>
+                  <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                        Branch Atual
+                      </h3>
+                      <code className="px-2 py-1 bg-gray-200 dark:bg-gray-900 rounded text-xs font-mono text-blue-600 dark:text-blue-400">
+                        {branchData.current_branch || gitStatus.branch || 'desconhecido'}
+                      </code>
+                    </div>
+
+                    <select
+                      value={selectedBranch}
+                      onChange={(e) => setSelectedBranch(e.target.value)}
+                      className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-sm"
+                    >
+                      <option value="">-- Escolha um branch local --</option>
+                      {branchData.locals.map((branch) => (
+                        <option key={`git-local-${branch.name}`} value={branch.name}>
+                          {branch.name} {branch.subject ? `• ${branch.subject}` : ''}
+                        </option>
+                      ))}
+                      {branchData.remotes.length > 0 && (
+                        <optgroup label="Remotos">
+                          {branchData.remotes.map((branch) => (
+                            <option key={`git-remote-${branch.name}`} value={branch.name}>
+                              {branch.name} {branch.subject ? `• ${branch.subject}` : ''}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                    </select>
+
+                    <div className="flex flex-wrap items-center gap-3 text-xs text-gray-600 dark:text-gray-400">
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          className="rounded"
+                          checked={branchFetch}
+                          onChange={(e) => setBranchFetch(e.target.checked)}
+                        />
+                        git fetch antes de trocar
+                      </label>
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          className="rounded"
+                          checked={branchForce}
+                          onChange={(e) => setBranchForce(e.target.checked)}
+                        />
+                        Stash automático (force)
+                      </label>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        onClick={handleBranchCheckout}
+                        disabled={branchLoading || !selectedBranch}
+                        className="bg-green-600 hover:bg-green-700"
+                      >
+                        <GitBranch className="w-4 h-4 mr-2" />
+                        {branchLoading ? 'Aplicando...' : 'Trocar Branch'}
+                      </Button>
+                      <Button
+                        onClick={() => loadBranches(true)}
+                        disabled={branchLoading}
+                        variant="outline"
+                        size="sm"
+                      >
+                        <RefreshCw className="w-4 h-4 mr-2" />
+                        Atualizar lista
+                      </Button>
+                    </div>
+
+                    {branchLog.length > 0 && (
+                      <div className="bg-white dark:bg-gray-900/40 border border-gray-200 dark:border-gray-700 rounded-lg p-3 space-y-2 max-h-48 overflow-auto">
+                        {branchLog.map((step, index) => (
+                          <div key={`git-branch-log-${index}`} className="text-xs">
+                            <div className="flex items-center gap-2">
+                              {step.success ? (
+                                <CheckCircle className="w-4 h-4 text-green-600" />
+                              ) : (
+                                <AlertCircle className="w-4 h-4 text-red-600" />
+                              )}
+                              <span className="font-medium text-gray-800 dark:text-gray-200">
+                                {step.step}
+                              </span>
+                            </div>
+                            {step.output && (
+                              <pre className="mt-1 whitespace-pre-wrap font-mono text-gray-600 dark:text-gray-400">
+                                {step.output}
+                              </pre>
+                            )}
+                            {step.error && (
+                              <p className="mt-1 text-red-600 dark:text-red-400">
+                                {step.error}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg">
@@ -821,7 +922,7 @@ export default function Maintenance() {
                     value={selectedBranch}
                     onChange={(e) => setSelectedBranch(e.target.value)}
                   >
-                    <option value="">-- Escolha um branch local --</option>
+                  <option value="">-- Escolha um branch local --</option>
                     {branchData.locals.map((branch) => (
                       <option key={`local-${branch.name}`} value={branch.name}>
                         {branch.name} • {branch.subject}
