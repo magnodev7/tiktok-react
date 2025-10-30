@@ -82,7 +82,7 @@ beckend/web/
 .env.test.local
 .env.production.local
 *.local
-beckend/.env
+!beckend/.env
 
 # ───────────────────────────────────────────────────────────────
 # Logs
