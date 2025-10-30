@@ -255,3 +255,59 @@ def _get_logs_from_json(account_name: Optional[str] = None, limit: int = 50) -> 
     except Exception as e:
         print(f"[log_service] ❌ Erro ao ler logs do JSON: {e}")
         return []
+
+
+def clear_logs(account_name: Optional[str] = None) -> dict:
+    """
+    Limpa logs do banco de dados e do arquivo JSON.
+
+    Args:
+        account_name: se informado, remove apenas logs dessa conta.
+
+    Returns:
+        Dict com contagem do que foi removido.
+    """
+    removed_db = 0
+    removed_json = 0
+
+    try:
+        from src.repositories import SystemLogRepository
+
+        with get_db_session() as db:
+            if account_name:
+                removed_db = SystemLogRepository.delete_by_account(db, account_name)
+            else:
+                removed_db = SystemLogRepository.delete_all(db)
+    except Exception as exc:
+        print(f"[log_service] ❌ Erro ao limpar logs no banco: {exc}")
+        raise
+
+    try:
+        if LOGS_JSON.exists():
+            raw = LOGS_JSON.read_text(encoding="utf-8")
+            try:
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    data = {"logs": []}
+            except (JSONDecodeError, ValueError):
+                data = {"logs": []}
+
+            logs = data.get("logs", [])
+            if account_name:
+                filtered = [log for log in logs if log.get("account_name") != account_name]
+            else:
+                filtered = []
+
+            removed_json = len(logs) - len(filtered)
+            data["logs"] = filtered
+
+            tmp_name = f"{LOGS_JSON.name}.{uuid.uuid4().hex}.tmp"
+            tmp_path = LOGS_JSON.parent / tmp_name
+            tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp_path, LOGS_JSON)
+        else:
+            LOGS_JSON.write_text(json.dumps({"logs": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"[log_service] ⚠️ Falha ao limpar logs do arquivo JSON: {exc}")
+
+    return {"removed_db": removed_db, "removed_json": removed_json}

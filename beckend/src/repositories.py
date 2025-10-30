@@ -913,6 +913,24 @@ class SystemLogRepository:
         db.commit()
         return count
 
+    @staticmethod
+    def delete_by_account(db: Session, account_name: str) -> int:
+        """Remove todos os logs associados a uma conta específica."""
+        from src.models import SystemLog
+
+        count = db.query(SystemLog).filter(SystemLog.account_name == account_name).delete()
+        db.commit()
+        return count
+
+    @staticmethod
+    def delete_all(db: Session) -> int:
+        """Remove todos os logs do sistema."""
+        from src.models import SystemLog
+
+        count = db.query(SystemLog).delete()
+        db.commit()
+        return count
+
 
 class UserPreferencesRepository:
     """Repositório para operações de preferências de usuário"""

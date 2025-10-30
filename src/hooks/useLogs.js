@@ -14,6 +14,6 @@ export function useLogs(limit = 50, accountName = null, enableAutoRefresh = true
       const { data } = await apiClient.get(`/api/logs?${params.toString()}`);
       return data?.logs || [];
     },
-    refetchInterval: enableAutoRefresh ? 5000 : false, // Atualiza a cada 5 segundos ou desabilita
+    refetchInterval: enableAutoRefresh ? 3000 : false, // Atualiza mais rápido quando ao vivo
   });
 }

@@ -1,11 +1,12 @@
-import { FileText, Search, RefreshCw, Filter, AlertCircle, Info, AlertTriangle, XCircle, Pause, Play, Clock } from 'lucide-react';
+import { FileText, Search, RefreshCw, Filter, AlertCircle, Info, AlertTriangle, XCircle, Pause, Play, Clock, Trash2 } from 'lucide-react';
 import { useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import Card from '@/components/common/Card';
-import Input from '@/components/common/Input';
 import Badge from '@/components/common/Badge';
 import { useLogs } from '@/hooks/useLogs';
 import { useAccounts } from '@/hooks/useAccounts';
 import Spinner from '@/components/common/Spinner';
+import apiClient from '@/api/client';
 
 export default function Logs() {
   const [limit, setLimit] = useState(50);
@@ -15,13 +16,42 @@ export default function Logs() {
   const [isPaused, setIsPaused] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
+  const queryClient = useQueryClient();
   const { data: logs, isLoading, refetch, dataUpdatedAt } = useLogs(limit, selectedAccount, !isPaused);
   const { data: accounts } = useAccounts();
+
+  const clearLogsMutation = useMutation({
+    mutationFn: async ({ account }) => {
+      const params = new URLSearchParams();
+      if (account) {
+        params.append('account', account);
+      }
+      const url = params.toString() ? `/api/logs?${params}` : '/api/logs';
+      await apiClient.delete(url);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['logs'], exact: false });
+    },
+  });
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
     await refetch();
     setTimeout(() => setIsRefreshing(false), 500);
+  };
+
+  const handleClearLogs = async () => {
+    const scope = selectedAccount ? `da conta ${selectedAccount}` : 'todos os logs';
+    if (!window.confirm(`Tem certeza que deseja limpar ${scope}?`)) {
+      return;
+    }
+    try {
+      await clearLogsMutation.mutateAsync({ account: selectedAccount });
+    } catch (error) {
+      console.error('Erro ao limpar logs:', error);
+      const apiMessage = error?.response?.data?.message || error?.message || 'Não foi possível limpar os logs.';
+      window.alert(apiMessage);
+    }
   };
 
   // Formatar tempo relativo
@@ -259,6 +289,16 @@ export default function Logs() {
           >
             <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
             {isRefreshing ? 'Atualizando...' : 'Atualizar'}
+          </button>
+
+          {/* Clear logs */}
+          <button
+            onClick={handleClearLogs}
+            disabled={clearLogsMutation.isLoading}
+            className="h-10 px-4 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Trash2 className={`w-4 h-4 ${clearLogsMutation.isLoading ? 'animate-spin' : ''}`} />
+            {clearLogsMutation.isLoading ? 'Limpando...' : 'Limpar logs'}
           </button>
         </div>
       </Card>
