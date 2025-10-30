@@ -454,13 +454,16 @@ class TikTokUploader:
             return False
         return True
 
-    def _wait_upload_ready(self, timeout: int = 180) -> bool:
+    def _wait_upload_ready(self, timeout: int = 180, max_timeout: int = 900) -> bool:
         """
         Observa o status do cartão principal no Studio para confirmar
         se o upload foi concluído ou falhou.
         """
-        deadline = time.time() + timeout
+        start_ts = time.time()
+        deadline = start_ts + timeout
+        hard_deadline = start_ts + max_timeout
         last_status: Optional[str] = None
+        last_status_ts = start_ts
 
         while time.time() < deadline:
             try:
@@ -484,6 +487,9 @@ class TikTokUploader:
             if joined and joined != last_status:
                 self.log(f"ℹ️ Status de upload: {joined}")
                 last_status = joined
+                last_status_ts = time.time()
+                # Enquanto houver progresso recente, estende o deadline (até o limite hard)
+                deadline = min(hard_deadline, last_status_ts + timeout)
 
             if texts:
                 joined_lower = joined.lower()
