@@ -240,6 +240,7 @@ class TikTokUploader:
         self._audience_supported = True
         self._description_warning_emitted = False
         self._audience_warning_emitted = False
+        self._last_caption_selector: Optional[int] = None
 
     # -----------------------------
     # 0) Cookies
@@ -566,6 +567,85 @@ class TikTokUploader:
     # -----------------------------
     # 3) Preencher descrição
     # -----------------------------
+    def _find_caption_field(self, timeout: int = 25):
+        """Localiza o campo de descrição usando busca rápida com fallback em JS."""
+        selectors: List[Tuple[str, str]] = [
+            (By.CSS_SELECTOR, "div[data-e2e='caption-editor'] div[contenteditable='true']"),
+            (By.CSS_SELECTOR, "div[data-e2e='caption'] div[contenteditable='true']"),
+            (By.CSS_SELECTOR, "div[contenteditable='true'][data-placeholder]"),
+            (By.XPATH, "//div[@contenteditable='true' and @role='textbox']"),
+            (By.CSS_SELECTOR, "textarea[data-e2e='caption-textarea']"),
+            (By.CSS_SELECTOR, "textarea"),
+        ]
+
+        css_selectors = [value for by, value in selectors if by == By.CSS_SELECTOR]
+        end_time = time.time() + timeout
+        last_progress_log = 0.0
+
+        while time.time() < end_time:
+            for idx, (by, value) in enumerate(selectors, 1):
+                try:
+                    elements = self.driver.find_elements(by, value)
+                except Exception:
+                    elements = []
+
+                for el in elements:
+                    try:
+                        if el.is_displayed():
+                            if self._last_caption_selector != idx:
+                                self.log(f"✅ Campo de descrição encontrado (seletor {idx})")
+                                self._last_caption_selector = idx
+                            return el
+                    except StaleElementReferenceException:
+                        continue
+
+            # Fallback em JS (principalmente quando o React reconstrói o DOM)
+            if css_selectors:
+                try:
+                    js_result = self.driver.execute_script(
+                        """
+                        const selectors = arguments[0];
+                        const isVisible = el => !!(el && el.offsetParent !== null);
+                        for (const sel of selectors) {
+                            const el = document.querySelector(sel);
+                            if (isVisible(el)) {
+                                return el;
+                            }
+                        }
+                        const iframes = document.querySelectorAll('iframe');
+                        for (const frame of iframes) {
+                            try {
+                                const doc = frame.contentDocument;
+                                if (!doc) continue;
+                                for (const sel of selectors) {
+                                    const el = doc.querySelector(sel);
+                                    if (isVisible(el)) {
+                                        return el;
+                                    }
+                                }
+                            } catch (err) {
+                                continue;
+                            }
+                        }
+                        return null;
+                        """,
+                        css_selectors,
+                    )
+                    if js_result:
+                        self.log("✅ Campo de descrição encontrado via querySelector")
+                        self._last_caption_selector = 0
+                        return js_result
+                except Exception:
+                    pass
+
+            now = time.time()
+            if now - last_progress_log > 5:
+                self.log("⏳ Aguardando campo de descrição aparecer…")
+                last_progress_log = now
+            time.sleep(0.5)
+
+        return None
+
     def _fill_description(self, text: str):
         """
         Preenche campo de descrição com timeout e fallbacks robustos.
@@ -579,35 +659,9 @@ class TikTokUploader:
         try:
             # Sanitiza texto para remover caracteres fora do BMP
             text = _sanitize_text_for_chrome(text)
-            self.log(f"🔍 Buscando campo de descrição...")
+            self.log("🔍 Buscando campo de descrição (timeout ~25s)…")
 
-            # candidats atualizados para o campo de legenda/caption do Studio
-            candidates = [
-                (By.CSS_SELECTOR, "div[data-e2e='caption-editor'] div[contenteditable='true']"),
-                (By.CSS_SELECTOR, "div[data-e2e='caption'] div[contenteditable='true']"),
-                (By.CSS_SELECTOR, "div[contenteditable='true'][data-placeholder]"),
-                (By.XPATH, "//div[@contenteditable='true' and @role='textbox']"),
-                (By.CSS_SELECTOR, "textarea[data-e2e='caption-textarea']"),
-                (By.CSS_SELECTOR, "textarea"),
-            ]
-
-            box = None
-            for i, loc in enumerate(candidates, 1):
-                try:
-                    self.log(f"🔍 Tentando seletor {i}/{len(candidates)}...")
-                    candidate = WebDriverWait(self.driver, 8).until(
-                        EC.presence_of_element_located(loc)
-                    )
-                    if candidate and candidate.is_displayed():
-                        box = candidate
-                        self.log(f"✅ Campo encontrado (seletor {i})")
-                        break
-                except TimeoutException:
-                    continue
-                except Exception as e:
-                    self.log(f"⚠️ Erro no seletor {i}: {e}")
-                    continue
-
+            box = self._find_caption_field(timeout=25)
             if not box:
                 self._description_supported = False
                 if not self._description_warning_emitted:
