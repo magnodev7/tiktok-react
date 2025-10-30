@@ -788,49 +788,45 @@ export default function Maintenance() {
             </Button>
           </Card>
 
-            {updateLog.length > 0 && (
-              <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg">
-                <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
-                  <Terminal className="w-4 h-4" />
-                  Log de Atualização:
-                </h3>
-                <div className="space-y-2">
-                  {updateLog.map((step, index) => (
-                    <div
-                      key={index}
-                      className="flex items-start gap-2 text-sm"
-                    >
-                      {step.success ? (
-                        <CheckCircle className="w-4 h-4 text-green-600 flex-shrink-0 mt-0.5" />
-                      ) : (
-                        <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
-                      )}
-                      <div className="flex-1">
-                        <p className="font-medium text-gray-900 dark:text-white">
-                          {step.step}
+          {/* Log de Atualização/Reinstalação */}
+          {updateLog.length > 0 && (
+            <Card title="Log de Atualização">
+              <div className="space-y-2">
+                {updateLog.map((step, index) => (
+                  <div
+                    key={index}
+                    className="flex items-start gap-2 text-sm"
+                  >
+                    {step.success ? (
+                      <CheckCircle className="w-4 h-4 text-green-600 flex-shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                    )}
+                    <div className="flex-1">
+                      <p className="font-medium text-gray-900 dark:text-white">
+                        {step.step}
+                      </p>
+                      {step.message && (
+                        <p className="text-gray-600 dark:text-gray-400 text-xs">
+                          {step.message}
                         </p>
-                        {step.message && (
-                          <p className="text-gray-600 dark:text-gray-400 text-xs">
-                            {step.message}
-                          </p>
-                        )}
-                        {step.output && (
-                          <pre className="text-xs text-gray-500 dark:text-gray-500 mt-1 whitespace-pre-wrap font-mono">
-                            {step.output}
-                          </pre>
-                        )}
-                        {step.error && (
-                          <p className="text-red-600 dark:text-red-400 text-xs mt-1">
-                            {step.error}
-                          </p>
-                        )}
-                      </div>
+                      )}
+                      {step.output && (
+                        <pre className="text-xs text-gray-500 dark:text-gray-500 mt-1 whitespace-pre-wrap font-mono">
+                          {step.output}
+                        </pre>
+                      )}
+                      {step.error && (
+                        <p className="text-red-600 dark:text-red-400 text-xs mt-1">
+                          {step.error}
+                        </p>
+                      )}
                     </div>
-                  ))}
-                </div>
+                  </div>
+                ))}
               </div>
-            )}
-          </Card>
+            </Card>
+          )}
         </div>
       )}
 
