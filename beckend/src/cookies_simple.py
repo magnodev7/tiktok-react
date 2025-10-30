@@ -170,3 +170,46 @@ def save_cookies_for_account(driver: WebDriver, account_name: str) -> bool:
         logger.error(f"❌ Erro ao salvar cookies: {e}")
         print(f"❌ Erro ao salvar cookies: {e}")
         return False
+
+
+def cookies_marked_invalid(account_name: str) -> bool:
+    """
+    Verifica se cookies foram marcados como inválidos.
+
+    No sistema simplificado, sempre retorna False (sem sistema de markers).
+    Mantido para compatibilidade com código antigo.
+
+    Args:
+        account_name: Nome da conta
+
+    Returns:
+        Sempre False (sistema simplificado não usa markers)
+    """
+    return False
+
+
+def mark_cookies_invalid(account_name: str, reason: str) -> None:
+    """
+    Marca cookies como inválidos (stub para compatibilidade).
+
+    No sistema simplificado, não faz nada.
+    Mantido para compatibilidade com código antigo.
+
+    Args:
+        account_name: Nome da conta
+        reason: Motivo (ignorado)
+    """
+    pass
+
+
+def clear_cookies_invalid_marker(account_name: str) -> None:
+    """
+    Limpa marker de cookies inválidos (stub para compatibilidade).
+
+    No sistema simplificado, não faz nada.
+    Mantido para compatibilidade com código antigo.
+
+    Args:
+        account_name: Nome da conta
+    """
+    pass
