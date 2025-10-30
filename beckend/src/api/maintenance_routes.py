@@ -932,3 +932,230 @@ async def complete_reinstall(
             "completed": completed,
         }
     )
+
+
+@router.post("/migrate-to-simple", response_model=APIResponse[dict])
+async def migrate_to_simple_system(
+    current_user: UserModel = Depends(get_current_active_user),
+) -> APIResponse[dict]:
+    """
+    Migra para o sistema simplificado:
+    1. Faz backup dos arquivos originais
+    2. Substitui driver.py, cookies.py, uploader.py pelos simplificados
+    3. Reinicia serviços
+    """
+    _check_admin(current_user)
+
+    logger.info(f"User {current_user.username} iniciando MIGRAÇÃO PARA SISTEMA SIMPLIFICADO")
+
+    steps = []
+    errors = []
+
+    # 1. Verificar se arquivos simplificados existem
+    simple_files = {
+        "driver_simple.py": BACKEND_DIR / "src" / "driver_simple.py",
+        "cookies_simple.py": BACKEND_DIR / "src" / "cookies_simple.py",
+        "uploader_simple.py": BACKEND_DIR / "src" / "uploader_simple.py",
+    }
+
+    for name, path in simple_files.items():
+        if not path.exists():
+            errors.append(f"Arquivo {name} não encontrado. Execute git pull primeiro.")
+            return success_response(
+                message="Migração cancelada - arquivos simplificados não encontrados",
+                data={"steps": steps, "errors": errors, "completed": False}
+            )
+
+    steps.append({
+        "step": "check_files",
+        "success": True,
+        "message": "Arquivos simplificados encontrados"
+    })
+
+    # 2. Criar backup dos arquivos originais
+    import shutil
+    backup_files = {
+        "driver.py": BACKEND_DIR / "src" / "driver.py",
+        "cookies.py": BACKEND_DIR / "src" / "cookies.py",
+        "uploader.py": BACKEND_DIR / "src" / "uploader.py",
+    }
+
+    for name, path in backup_files.items():
+        backup_path = path.parent / f"{path.stem}_old_backup{path.suffix}"
+        if path.exists() and not backup_path.exists():
+            try:
+                shutil.copy2(path, backup_path)
+                logger.info(f"Backup criado: {backup_path}")
+            except Exception as e:
+                errors.append(f"Falha ao criar backup de {name}: {str(e)}")
+                return success_response(
+                    message="Migração cancelada - falha no backup",
+                    data={"steps": steps, "errors": errors, "completed": False}
+                )
+
+    steps.append({
+        "step": "backup",
+        "success": True,
+        "message": "Backup dos arquivos originais criado"
+    })
+
+    # 3. Substituir arquivos pelos simplificados
+    for simple_name, simple_path in simple_files.items():
+        target_name = simple_name.replace("_simple", "")
+        target_path = simple_path.parent / target_name
+
+        try:
+            shutil.copy2(simple_path, target_path)
+            logger.info(f"Arquivo substituído: {target_path}")
+        except Exception as e:
+            errors.append(f"Falha ao substituir {target_name}: {str(e)}")
+            return success_response(
+                message="Migração falhou - erro ao substituir arquivos",
+                data={"steps": steps, "errors": errors, "completed": False}
+            )
+
+    steps.append({
+        "step": "replace_files",
+        "success": True,
+        "message": "Arquivos substituídos com sucesso",
+        "replaced": ["driver.py", "cookies.py", "uploader.py"]
+    })
+
+    # 4. Reiniciar serviços
+    logger.info("Reiniciando serviços com código simplificado...")
+    restart_result, sudo_failed = _run_manage_command(["all", "restart"], timeout=60)
+
+    steps.append({
+        "step": "restart_services",
+        "success": restart_result["success"],
+        "output": restart_result["stdout"],
+        "error": restart_result["stderr"] if not restart_result["success"] else None,
+        "sudo_config_required": sudo_failed,
+    })
+
+    if not restart_result["success"]:
+        error_msg = "Falha ao reiniciar serviços"
+        if sudo_failed:
+            error_msg += " - execute sudo bash setup_sudo.sh no servidor"
+        errors.append(error_msg)
+
+    completed = len(errors) == 0
+    message = "Migração para sistema simplificado concluída! Monitore os logs." if completed else "Migração completada com erros"
+
+    logger.info(f"Migração para sistema simplificado finalizada. Sucesso: {completed}")
+
+    return success_response(
+        message=message,
+        data={
+            "steps": steps,
+            "errors": errors,
+            "completed": completed,
+            "backup_location": "beckend/src/*_old_backup.py",
+            "next_steps": [
+                "Monitore os logs para verificar funcionamento",
+                "Procure por ausência de 'Lock global adquirido'",
+                "Uploads devem completar em ~50s (antes: 3-5min)",
+                "Se houver problemas, use rollback"
+            ]
+        }
+    )
+
+
+@router.post("/rollback-simple", response_model=APIResponse[dict])
+async def rollback_from_simple_system(
+    current_user: UserModel = Depends(get_current_active_user),
+) -> APIResponse[dict]:
+    """
+    Faz rollback do sistema simplificado para o sistema original.
+    Restaura arquivos do backup *_old_backup.py
+    """
+    _check_admin(current_user)
+
+    logger.info(f"User {current_user.username} iniciando ROLLBACK DO SISTEMA SIMPLIFICADO")
+
+    steps = []
+    errors = []
+
+    # 1. Verificar se backups existem
+    import shutil
+    backup_files = {
+        "driver_old_backup.py": BACKEND_DIR / "src" / "driver_old_backup.py",
+        "cookies_old_backup.py": BACKEND_DIR / "src" / "cookies_old_backup.py",
+        "uploader_old_backup.py": BACKEND_DIR / "src" / "uploader_old_backup.py",
+    }
+
+    for name, path in backup_files.items():
+        if not path.exists():
+            errors.append(f"Backup {name} não encontrado")
+
+    if errors:
+        return success_response(
+            message="Rollback cancelado - backups não encontrados",
+            data={"steps": steps, "errors": errors, "completed": False}
+        )
+
+    steps.append({
+        "step": "check_backups",
+        "success": True,
+        "message": "Backups encontrados"
+    })
+
+    # 2. Restaurar arquivos do backup
+    target_files = {
+        "driver_old_backup.py": "driver.py",
+        "cookies_old_backup.py": "cookies.py",
+        "uploader_old_backup.py": "uploader.py",
+    }
+
+    for backup_name, target_name in target_files.items():
+        backup_path = BACKEND_DIR / "src" / backup_name
+        target_path = BACKEND_DIR / "src" / target_name
+
+        try:
+            shutil.copy2(backup_path, target_path)
+            logger.info(f"Arquivo restaurado: {target_path}")
+        except Exception as e:
+            errors.append(f"Falha ao restaurar {target_name}: {str(e)}")
+            return success_response(
+                message="Rollback falhou",
+                data={"steps": steps, "errors": errors, "completed": False}
+            )
+
+    steps.append({
+        "step": "restore_files",
+        "success": True,
+        "message": "Arquivos originais restaurados",
+        "restored": ["driver.py", "cookies.py", "uploader.py"]
+    })
+
+    # 3. Reiniciar serviços
+    logger.info("Reiniciando serviços com código original...")
+    restart_result, sudo_failed = _run_manage_command(["all", "restart"], timeout=60)
+
+    steps.append({
+        "step": "restart_services",
+        "success": restart_result["success"],
+        "output": restart_result["stdout"],
+        "error": restart_result["stderr"] if not restart_result["success"] else None,
+        "sudo_config_required": sudo_failed,
+    })
+
+    if not restart_result["success"]:
+        error_msg = "Falha ao reiniciar serviços"
+        if sudo_failed:
+            error_msg += " - execute sudo bash setup_sudo.sh no servidor"
+        errors.append(error_msg)
+
+    completed = len(errors) == 0
+    message = "Rollback concluído! Sistema voltou ao estado original." if completed else "Rollback completado com erros"
+
+    logger.info(f"Rollback do sistema simplificado finalizado. Sucesso: {completed}")
+
+    return success_response(
+        message=message,
+        data={
+            "steps": steps,
+            "errors": errors,
+            "completed": completed,
+        }
+    )
