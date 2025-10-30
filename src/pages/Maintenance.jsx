@@ -3,8 +3,6 @@ import {
   Server,
   GitBranch,
   RefreshCw,
-  Play,
-  Square,
   RotateCw,
   Activity,
   Terminal,
@@ -356,30 +354,21 @@ export default function Maintenance() {
       {activeTab === 'services' && (
         <div className="space-y-6">
           <Card title="Controle de Serviços">
+            <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mb-4">
+              <p className="text-sm text-blue-800 dark:text-blue-200">
+                💡 <strong>Dica:</strong> Use "Reiniciar" após fazer alterações no código.
+                Evite parar os serviços, pois você perderá acesso à interface web.
+              </p>
+            </div>
+
             <div className="flex flex-wrap items-center gap-3 mb-6">
-              <Button
-                onClick={() => handleServiceAction('start')}
-                disabled={loading}
-                className="bg-green-600 hover:bg-green-700"
-              >
-                <Play className="w-4 h-4 mr-2" />
-                Iniciar
-              </Button>
-              <Button
-                onClick={() => handleServiceAction('stop')}
-                disabled={loading}
-                className="bg-red-600 hover:bg-red-700"
-              >
-                <Square className="w-4 h-4 mr-2" />
-                Parar
-              </Button>
               <Button
                 onClick={() => handleServiceAction('restart')}
                 disabled={loading}
                 className="bg-blue-600 hover:bg-blue-700"
               >
                 <RotateCw className="w-4 h-4 mr-2" />
-                Reiniciar
+                {loading ? 'Reiniciando...' : 'Reiniciar Todos os Serviços'}
               </Button>
               <Button
                 onClick={loadServiceStatus}
