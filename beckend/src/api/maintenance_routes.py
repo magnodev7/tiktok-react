@@ -36,6 +36,11 @@ class UpdateRequest(BaseModel):
     force: bool = False
 
 
+class GitConfigRequest(BaseModel):
+    remote_url: str
+    remote_name: str = "origin"
+
+
 def _run_command(cmd: List[str], cwd: Optional[Path] = None, timeout: int = 300) -> dict:
     """Executa comando e retorna resultado."""
     try:
@@ -82,23 +87,70 @@ def _check_admin(user: UserModel) -> None:
 async def get_service_status(
     current_user: UserModel = Depends(get_current_active_user),
 ) -> APIResponse[dict]:
-    """Retorna o status de todos os serviços."""
+    """Retorna o status detalhado de todos os serviços."""
     _check_admin(current_user)
 
-    if not MANAGE_SH.exists():
-        raise_http_error(
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-            error="manage_script_not_found",
-            message="Script manage.sh não encontrado"
+    services = ["tiktok-backend", "tiktok-scheduler"]
+    services_status = {}
+
+    for service in services:
+        # Pegar status do systemctl
+        status_cmd = _run_command(
+            ["systemctl", "is-active", f"{service}.service"],
+            timeout=5
+        )
+        active_state = status_cmd["stdout"].strip()
+
+        # Pegar informações detalhadas
+        show_cmd = _run_command(
+            ["systemctl", "show", f"{service}.service", "--no-page"],
+            timeout=5
         )
 
-    result = _run_command(["bash", str(MANAGE_SH), "all", "status"], timeout=30)
+        # Parse das informações
+        info = {}
+        if show_cmd["success"]:
+            for line in show_cmd["stdout"].split("\n"):
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    info[key] = value
+
+        # Determinar status visual
+        if active_state == "active":
+            status = "running"
+            color = "green"
+        elif active_state == "inactive":
+            status = "stopped"
+            color = "gray"
+        elif active_state == "failed":
+            status = "failed"
+            color = "red"
+        elif active_state == "activating":
+            status = "starting"
+            color = "yellow"
+        elif active_state == "deactivating":
+            status = "stopping"
+            color = "orange"
+        else:
+            status = "unknown"
+            color = "gray"
+
+        services_status[service] = {
+            "name": service,
+            "status": status,
+            "color": color,
+            "active_state": active_state,
+            "load_state": info.get("LoadState", "unknown"),
+            "sub_state": info.get("SubState", "unknown"),
+            "main_pid": info.get("MainPID", "0"),
+            "memory": info.get("MemoryCurrent", "0"),
+            "uptime": info.get("ActiveEnterTimestamp", ""),
+        }
 
     return success_response(
         data={
-            "status": result["stdout"],
-            "success": result["success"],
-            "error": result["stderr"] if not result["success"] else None,
+            "services": services_status,
+            "timestamp": _run_command(["date", "+%s"], timeout=2)["stdout"].strip(),
         }
     )
 
@@ -226,6 +278,86 @@ async def get_git_log(
                 })
 
     return success_response(data={"commits": commits})
+
+
+@router.get("/git/config", response_model=APIResponse[dict])
+async def get_git_config(
+    current_user: UserModel = Depends(get_current_active_user),
+) -> APIResponse[dict]:
+    """Retorna configuração do Git (remote URL)."""
+    _check_admin(current_user)
+
+    # Listar remotes
+    remotes_result = _run_command(["git", "remote", "-v"], timeout=5)
+
+    remotes = {}
+    if remotes_result["success"]:
+        for line in remotes_result["stdout"].strip().split("\n"):
+            if line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    name = parts[0]
+                    url = parts[1]
+                    if name not in remotes:
+                        remotes[name] = url
+
+    # Pegar branch atual
+    branch_result = _run_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=5)
+    current_branch = branch_result["stdout"].strip() if branch_result["success"] else "unknown"
+
+    return success_response(
+        data={
+            "remotes": remotes,
+            "current_branch": current_branch,
+        }
+    )
+
+
+@router.post("/git/config", response_model=APIResponse[dict])
+async def update_git_config(
+    config: GitConfigRequest,
+    current_user: UserModel = Depends(get_current_active_user),
+) -> APIResponse[dict]:
+    """Atualiza a URL do remote Git."""
+    _check_admin(current_user)
+
+    logger.info(f"User {current_user.username} atualizando Git remote: {config.remote_name} -> {config.remote_url}")
+
+    # Verificar se o remote existe
+    check_result = _run_command(
+        ["git", "remote", "get-url", config.remote_name],
+        timeout=5
+    )
+
+    if check_result["success"]:
+        # Remote existe, atualizar URL
+        result = _run_command(
+            ["git", "remote", "set-url", config.remote_name, config.remote_url],
+            timeout=10
+        )
+        action = "atualizada"
+    else:
+        # Remote não existe, adicionar
+        result = _run_command(
+            ["git", "remote", "add", config.remote_name, config.remote_url],
+            timeout=10
+        )
+        action = "adicionada"
+
+    if not result["success"]:
+        raise_http_error(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            error="git_config_failed",
+            message=f"Falha ao configurar remote: {result['stderr']}"
+        )
+
+    return success_response(
+        message=f"URL do remote '{config.remote_name}' {action} com sucesso",
+        data={
+            "remote_name": config.remote_name,
+            "remote_url": config.remote_url,
+        }
+    )
 
 
 @router.post("/update", response_model=APIResponse[dict])

@@ -25,10 +25,14 @@ export default function Maintenance() {
   const [loading, setLoading] = useState(false);
   const [serviceStatus, setServiceStatus] = useState(null);
   const [gitStatus, setGitStatus] = useState(null);
+  const [gitConfig, setGitConfig] = useState(null);
   const [gitLog, setGitLog] = useState([]);
   const [updateLog, setUpdateLog] = useState([]);
   const [logs, setLogs] = useState('');
   const [selectedLogService, setSelectedLogService] = useState('backend');
+  const [editingGitUrl, setEditingGitUrl] = useState(false);
+  const [newGitUrl, setNewGitUrl] = useState('');
+  const [autoRefresh, setAutoRefresh] = useState(true);
 
   // Verificar se é admin
   useEffect(() => {
@@ -45,11 +49,23 @@ export default function Maintenance() {
     }
   }, [activeTab]);
 
+  // Auto-refresh do status dos serviços
+  useEffect(() => {
+    if (activeTab === 'services' && autoRefresh) {
+      const interval = setInterval(() => {
+        loadServiceStatus();
+      }, 3000); // Atualiza a cada 3 segundos
+
+      return () => clearInterval(interval);
+    }
+  }, [activeTab, autoRefresh]);
+
   // Carregar status do git ao mudar para aba git
   useEffect(() => {
     if (activeTab === 'git') {
       loadGitStatus();
       loadGitLog();
+      loadGitConfig();
     }
   }, [activeTab]);
 
@@ -90,6 +106,44 @@ export default function Maintenance() {
       }
     } catch (error) {
       console.error('Erro ao carregar log do git:', error);
+    }
+  };
+
+  const loadGitConfig = async () => {
+    try {
+      const response = await api.get('/api/maintenance/git/config');
+      if (response.data?.success) {
+        setGitConfig(response.data.data);
+        setNewGitUrl(response.data.data.remotes?.origin || '');
+      }
+    } catch (error) {
+      console.error('Erro ao carregar configuração do git:', error);
+    }
+  };
+
+  const saveGitConfig = async () => {
+    if (!newGitUrl.trim()) {
+      alert('❌ URL do repositório não pode estar vazia');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const response = await api.post('/api/maintenance/git/config', {
+        remote_url: newGitUrl,
+        remote_name: 'origin',
+      });
+
+      if (response.data?.success) {
+        alert('✅ ' + response.data.message);
+        setEditingGitUrl(false);
+        await loadGitConfig();
+      }
+    } catch (error) {
+      const message = error.response?.data?.message || error.message;
+      alert(`❌ Erro ao salvar configuração: ${message}`);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -163,6 +217,50 @@ export default function Maintenance() {
     return new Date(timestamp * 1000).toLocaleString('pt-BR');
   };
 
+  const getStatusBadge = (service) => {
+    const statusConfig = {
+      running: {
+        color: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
+        icon: '●',
+        label: 'Executando',
+      },
+      stopped: {
+        color: 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300',
+        icon: '■',
+        label: 'Parado',
+      },
+      starting: {
+        color: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
+        icon: '◐',
+        label: 'Iniciando',
+      },
+      stopping: {
+        color: 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200',
+        icon: '◑',
+        label: 'Parando',
+      },
+      failed: {
+        color: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+        icon: '✕',
+        label: 'Falhou',
+      },
+      unknown: {
+        color: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400',
+        icon: '?',
+        label: 'Desconhecido',
+      },
+    };
+
+    const config = statusConfig[service.status] || statusConfig.unknown;
+
+    return (
+      <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium ${config.color}`}>
+        <span className="text-lg leading-none">{config.icon}</span>
+        {config.label}
+      </span>
+    );
+  };
+
   const tabs = [
     { id: 'services', label: 'Serviços', icon: Server },
     { id: 'git', label: 'Git Status', icon: GitBranch },
@@ -206,7 +304,7 @@ export default function Maintenance() {
       {activeTab === 'services' && (
         <div className="space-y-6">
           <Card title="Controle de Serviços">
-            <div className="flex flex-wrap gap-3 mb-6">
+            <div className="flex flex-wrap items-center gap-3 mb-6">
               <Button
                 onClick={() => handleServiceAction('start')}
                 disabled={loading}
@@ -239,16 +337,76 @@ export default function Maintenance() {
                 <Activity className="w-4 h-4 mr-2" />
                 Atualizar Status
               </Button>
+
+              <label className="flex items-center gap-2 ml-auto text-sm text-gray-600 dark:text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={autoRefresh}
+                  onChange={(e) => setAutoRefresh(e.target.checked)}
+                  className="rounded"
+                />
+                Auto-refresh (3s)
+              </label>
             </div>
 
-            {serviceStatus && (
-              <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg">
-                <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">
-                  Status dos Serviços:
-                </h3>
-                <pre className="text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap font-mono">
-                  {serviceStatus.status || 'Carregando...'}
-                </pre>
+            {serviceStatus?.services && (
+              <div className="space-y-4">
+                {Object.values(serviceStatus.services).map((service) => (
+                  <div
+                    key={service.name}
+                    className="bg-gray-50 dark:bg-gray-800 p-4 rounded-lg border border-gray-200 dark:border-gray-700"
+                  >
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-3">
+                        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                          {service.name}
+                        </h3>
+                        {getStatusBadge(service)}
+                      </div>
+                      {service.main_pid !== '0' && (
+                        <span className="text-sm text-gray-500 dark:text-gray-400">
+                          PID: {service.main_pid}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                      <div>
+                        <span className="text-gray-500 dark:text-gray-400">State:</span>
+                        <span className="ml-2 font-medium text-gray-900 dark:text-white">
+                          {service.active_state}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500 dark:text-gray-400">Sub-state:</span>
+                        <span className="ml-2 font-medium text-gray-900 dark:text-white">
+                          {service.sub_state}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500 dark:text-gray-400">Load:</span>
+                        <span className="ml-2 font-medium text-gray-900 dark:text-white">
+                          {service.load_state}
+                        </span>
+                      </div>
+                      {service.uptime && (
+                        <div>
+                          <span className="text-gray-500 dark:text-gray-400">Uptime:</span>
+                          <span className="ml-2 font-medium text-gray-900 dark:text-white text-xs">
+                            {service.uptime.split(' ').slice(0, 4).join(' ')}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!serviceStatus && (
+              <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+                <Activity className="w-8 h-8 mx-auto mb-2 animate-spin" />
+                <p>Carregando status dos serviços...</p>
               </div>
             )}
           </Card>
@@ -258,6 +416,61 @@ export default function Maintenance() {
       {/* Git Status Tab */}
       {activeTab === 'git' && (
         <div className="space-y-6">
+          <Card title="Configuração do Repositório">
+            <div className="bg-gray-50 dark:bg-gray-800 p-4 rounded-lg mb-4">
+              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">
+                URL do Repositório Git:
+              </h3>
+
+              {!editingGitUrl ? (
+                <div className="flex items-center gap-3">
+                  <code className="flex-1 px-3 py-2 bg-white dark:bg-gray-900 rounded border border-gray-200 dark:border-gray-700 text-sm font-mono text-gray-900 dark:text-gray-100">
+                    {gitConfig?.remotes?.origin || 'Não configurado'}
+                  </code>
+                  <Button
+                    onClick={() => setEditingGitUrl(true)}
+                    variant="outline"
+                    size="sm"
+                  >
+                    Editar
+                  </Button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <input
+                    type="text"
+                    value={newGitUrl}
+                    onChange={(e) => setNewGitUrl(e.target.value)}
+                    placeholder="https://github.com/usuario/repositorio.git"
+                    className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={saveGitConfig}
+                      disabled={loading}
+                      className="bg-blue-600 hover:bg-blue-700"
+                    >
+                      Salvar
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        setEditingGitUrl(false);
+                        setNewGitUrl(gitConfig?.remotes?.origin || '');
+                      }}
+                      variant="outline"
+                    >
+                      Cancelar
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                Esta URL será usada para fazer git pull nas atualizações automáticas
+              </p>
+            </div>
+          </Card>
+
           <Card title="Status do Repositório">
             <div className="flex items-center justify-between mb-4">
               <Button
