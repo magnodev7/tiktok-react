@@ -79,11 +79,15 @@ export default function Maintenance() {
   const loadServiceStatus = async () => {
     try {
       const response = await api.get('/api/maintenance/service/status');
+      console.log('[Maintenance] Service status response:', response.data);
       if (response.data?.success) {
         setServiceStatus(response.data.data);
+      } else {
+        console.error('[Maintenance] Service status failed:', response.data);
       }
     } catch (error) {
       console.error('Erro ao carregar status dos serviços:', error);
+      setServiceStatus({ services: {}, error: error.message });
     }
   };
 
@@ -134,12 +138,17 @@ export default function Maintenance() {
         remote_name: 'origin',
       });
 
+      console.log('[Maintenance] Git config save response:', response.data);
+
       if (response.data?.success) {
         alert('✅ ' + response.data.message);
         setEditingGitUrl(false);
+        // Recarregar configuração e status
         await loadGitConfig();
+        await loadGitStatus();
       }
     } catch (error) {
+      console.error('[Maintenance] Git config error:', error);
       const message = error.response?.data?.message || error.message;
       alert(`❌ Erro ao salvar configuração: ${message}`);
     } finally {
@@ -180,11 +189,11 @@ export default function Maintenance() {
   };
 
   const handleUpdate = async (force = false) => {
-    if (!confirm(
-      force
-        ? 'Tem certeza? Mudanças locais serão descartadas!'
-        : 'Atualizar o sistema do GitHub?'
-    )) {
+    const confirmMessage = force
+      ? '⚠️ ATENÇÃO: Mudanças locais serão DESCARTADAS!\n\nDeseja continuar?'
+      : '🔄 Atualizar o sistema do GitHub?\n\nIsso vai:\n- Fazer git pull\n- Detectar mudanças\n- Buildar frontend (se necessário)\n- Reiniciar backend (se necessário)';
+
+    if (!confirm(confirmMessage)) {
       return;
     }
 
@@ -205,7 +214,25 @@ export default function Maintenance() {
         }
       }
     } catch (error) {
-      const message = error.response?.data?.message || error.message;
+      console.error('[Maintenance] Update error:', error);
+      const apiError = error.response?.data;
+      const message = apiError?.message || error.message;
+
+      // Se for erro de mudanças locais, mostrar opção de forçar
+      if (message.includes('alterações locais') || message.includes('uncommitted changes')) {
+        const forceUpdate = confirm(
+          `❌ ${message}\n\n` +
+          '💡 Deseja FORÇAR a atualização?\n' +
+          '(Isso vai descartar as mudanças locais)'
+        );
+
+        if (forceUpdate) {
+          // Chamar novamente com force=true
+          handleUpdate(true);
+          return;
+        }
+      }
+
       alert(`❌ Erro na atualização: ${message}`);
       setUpdateLog([{ step: 'error', success: false, error: message }]);
     } finally {
@@ -349,7 +376,19 @@ export default function Maintenance() {
               </label>
             </div>
 
-            {serviceStatus?.services && (
+            {serviceStatus?.error && (
+              <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
+                <div className="flex items-center gap-2 text-red-800 dark:text-red-200">
+                  <AlertCircle className="w-5 h-5" />
+                  <p className="font-medium">Erro ao carregar serviços:</p>
+                </div>
+                <p className="text-sm text-red-600 dark:text-red-300 mt-1">
+                  {serviceStatus.error}
+                </p>
+              </div>
+            )}
+
+            {serviceStatus?.services && Object.keys(serviceStatus.services).length > 0 && (
               <div className="space-y-4">
                 {Object.values(serviceStatus.services).map((service) => (
                   <div
@@ -407,6 +446,13 @@ export default function Maintenance() {
               <div className="text-center py-8 text-gray-500 dark:text-gray-400">
                 <Activity className="w-8 h-8 mx-auto mb-2 animate-spin" />
                 <p>Carregando status dos serviços...</p>
+              </div>
+            )}
+
+            {serviceStatus && !serviceStatus.error && (!serviceStatus.services || Object.keys(serviceStatus.services).length === 0) && (
+              <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+                <AlertCircle className="w-8 h-8 mx-auto mb-2" />
+                <p>Nenhum serviço encontrado</p>
               </div>
             )}
           </Card>
