@@ -235,6 +235,11 @@ class TikTokUploader:
         self._initial_session_id = getattr(driver, "session_id", None)
         self._current_session_id = self._initial_session_id
         self._cookies_applied = reuse_existing_session
+        # Flags para evitar repetir estratégias que já falharam na sessão atual
+        self._description_supported = True
+        self._audience_supported = True
+        self._description_warning_emitted = False
+        self._audience_warning_emitted = False
 
     # -----------------------------
     # 0) Cookies
@@ -566,6 +571,11 @@ class TikTokUploader:
         Preenche campo de descrição com timeout e fallbacks robustos.
         Se falhar completamente, continua sem travar (descrição é opcional).
         """
+        if not self._description_supported:
+            if not self._description_warning_emitted:
+                self.log("⏭️ Descrição pulada (campo não disponível em execuções anteriores)")
+                self._description_warning_emitted = True
+            return
         try:
             # Sanitiza texto para remover caracteres fora do BMP
             text = _sanitize_text_for_chrome(text)
@@ -599,7 +609,10 @@ class TikTokUploader:
                     continue
 
             if not box:
-                self.log("⚠️ Não achei campo de descrição; prosseguindo sem descrição")
+                self._description_supported = False
+                if not self._description_warning_emitted:
+                    self.log("⚠️ Não achei campo de descrição; prosseguindo sem descrição")
+                    self._description_warning_emitted = True
                 return
 
             try:
@@ -672,11 +685,18 @@ class TikTokUploader:
             # Captura QUALQUER erro não tratado para evitar travamento
             self.log(f"⚠️ Erro crítico ao preencher descrição: {outer_exc}")
             self.log("⏭️ Continuando sem descrição para não travar a postagem")
+            self._description_supported = False
+            self._description_warning_emitted = True
 
     # -----------------------------
     # 4) Garantir audiência pública (sem abrir dropdown à toa)
     # -----------------------------
     def _ensure_public_audience(self):
+        if not self._audience_supported:
+            if not self._audience_warning_emitted:
+                self.log("⏭️ Ajuste de audiência pulado (não suportado neste layout)")
+                self._audience_warning_emitted = True
+            return
         # Detecta se já está em "Everyone/Para todos" usando data-e2e e texto
         public_indicators = [
             (By.XPATH, "//*[(@data-e2e='audience-selector' or contains(@class,'select') or contains(@class,'selector')) and (.//text()[contains(.,'Everyone') or contains(.,'Para todos')])]"),
@@ -713,7 +733,10 @@ class TikTokUploader:
                 continue
 
         if not opener:
-            self.log("⚠️ Não encontrei o seletor de audiência; prosseguindo sem alteração.")
+            self._audience_supported = False
+            if not self._audience_warning_emitted:
+                self.log("⚠️ Não encontrei o seletor de audiência; prosseguindo sem alteração.")
+                self._audience_warning_emitted = True
             return
 
         # Seleciona "Everyone / Para todos"
@@ -734,7 +757,10 @@ class TikTokUploader:
             except TimeoutException:
                 continue
 
-        self.log("ℹ️ Não consegui alterar audiência (seguindo assim).")
+        self._audience_supported = False
+        if not self._audience_warning_emitted:
+            self.log("ℹ️ Não consegui alterar audiência (seguindo assim).")
+            self._audience_warning_emitted = True
 
     # -----------------------------
     # 5) Botão de “Post/Publish”

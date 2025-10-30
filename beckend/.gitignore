@@ -32,7 +32,6 @@ state/trash/
 logs/
 
 # Environment
-.env
 .env.local
 
 # Database
