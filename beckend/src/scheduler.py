@@ -46,10 +46,10 @@ for _extra in (MaxRetryError, NewConnectionError, ConnectTimeoutError):
         TRANSIENT_DRIVER_ERRORS.append(_extra)
 TRANSIENT_DRIVER_ERRORS = tuple(TRANSIENT_DRIVER_ERRORS)
 
-# ====== Lock global para serializar postagens entre TODAS as contas ======
-# Garante que apenas UMA conta por vez execute o processo completo de postagem
-# (criar Chrome, login, upload, finalização) para evitar sobrecarga de recursos
-_GLOBAL_POSTING_LOCK = threading.Lock()
+# ====== Lock global REMOVIDO (sistema simplificado) ======
+# Sistema simplificado não precisa de lock global - Chrome é leve e rápido
+# Múltiplas contas podem rodar em paralelo sem problemas
+# _GLOBAL_POSTING_LOCK = threading.Lock()  # DESABILITADO
 
 # ====== Config de fuso e estado ======
 APP_TZ = ZoneInfo(os.getenv("TZ", "America/Sao_Paulo"))
@@ -785,11 +785,12 @@ class TikTokScheduler:
                 self.log(f"   3. Os vídeos permanecerão na fila até que os cookies sejam atualizados")
                 return
 
-            # LOCK GLOBAL: somente após sessão válida, para não bloquear outras contas durante o login
-            self.log(f"⏳ [{self.account}] Aguardando vez para postar...")
-            _GLOBAL_POSTING_LOCK.acquire()
-            lock_acquired = True
-            self.log(f"🔓 [{self.account}] Lock global adquirido, iniciando postagem...")
+            # LOCK GLOBAL REMOVIDO (sistema simplificado)
+            # Sistema simplificado não precisa serializar - roda em paralelo!
+            # self.log(f"⏳ [{self.account}] Aguardando vez para postar...")
+            # _GLOBAL_POSTING_LOCK.acquire()
+            lock_acquired = False  # Desabilitado
+            # self.log(f"🔓 [{self.account}] Lock global adquirido, iniciando postagem...")
 
             for i, dv in enumerate(to_post, 1):
                 self.log(f"\n📤 Postando vídeo {i} de {len(to_post)} :: {Path(dv.path).name}")
@@ -817,13 +818,13 @@ class TikTokScheduler:
 
             self.log("✅ Tick concluído\n")
         finally:
-            # Sempre libera os locks, mesmo em caso de erro
-            if lock_acquired:
-                try:
-                    _GLOBAL_POSTING_LOCK.release()
-                    self.log(f"🔓 [{self.account}] Lock global liberado")
-                except:
-                    pass  # Se não estava adquirido, ignora
+            # Lock global REMOVIDO (sistema simplificado)
+            # if lock_acquired:
+            #     try:
+            #         _GLOBAL_POSTING_LOCK.release()
+            #         self.log(f"🔓 [{self.account}] Lock global liberado")
+            #     except:
+            #         pass  # Se não estava adquirido, ignora
             self._posting_lock.release()
 
     # -------- agendamento dos ticks --------
