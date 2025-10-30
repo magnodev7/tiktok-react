@@ -35,6 +35,11 @@ from .paths import account_dirs, ensure_base
 from .cookies import load_cookies_for_account
 from .config import SCHEDULES, TEST_MODE, DELETE_AFTER_POST
 
+MAX_POSTS_PER_TICK = int(os.getenv("TIKTOK_MAX_POSTS_PER_TICK", "3"))
+FAST_CATCHUP_SECONDS = int(os.getenv("TIKTOK_FAST_CATCHUP_SECONDS", "20"))
+BURST_RESCHEDULE_GAP_SECONDS = float(os.getenv("TIKTOK_BURST_RESCHEDULE_GAP_SECONDS", "30"))
+BURST_RESCHEDULE_WINDOW_SECONDS = float(os.getenv("TIKTOK_BURST_RESCHEDULE_WINDOW_SECONDS", "120"))
+
 TRANSIENT_DRIVER_ERRORS = [WebDriverException, ConnectionError, socket.error]
 for _extra in (MaxRetryError, NewConnectionError, ConnectTimeoutError):
     if isinstance(_extra, type):
@@ -720,11 +725,19 @@ class TikTokScheduler:
     def _reschedule_leftovers(self, leftovers: List[DueVideo]):
         if not leftovers:
             return
-        schedules = _read_schedules()
-        for dv in leftovers:
-            ymd, hhmm, iso_utc = _find_next_free_slot(self.VIDEO_DIR, schedules)
+        gap = max(5.0, BURST_RESCHEDULE_GAP_SECONDS)
+        window = max(gap, BURST_RESCHEDULE_WINDOW_SECONDS)
+        base = _now_app()
+        for idx, dv in enumerate(leftovers, 1):
+            delta_seconds = min(gap * idx, window)
+            new_dt = base + dt.timedelta(seconds=delta_seconds)
+            hhmm = new_dt.strftime("%H:%M")
+            iso_utc = new_dt.astimezone(timezone.utc).isoformat()
             _update_sidecars_for(dv.path, hhmm, iso_utc, self.log)
-            self.log(f"↪️ Reagendado: {Path(dv.path).name} → {ymd} {hhmm}")
+            self.log(
+                f"↪️ Reagendado: {Path(dv.path).name} → {new_dt.strftime('%Y-%m-%d %H:%M:%S')} "
+                f"(em {int(delta_seconds)}s)"
+            )
 
     # -------- tick principal --------
     def scheduled_posting(self):
@@ -750,10 +763,18 @@ class TikTokScheduler:
                 self.log("📭 Nenhum vídeo due neste momento")
                 return
 
-            # garante 1 por rodada; reagenda excedentes
+            # garante burst controlado por rodada; reagenda excedentes próximos
             due.sort(key=lambda dv: dv.scheduled_at)
-            to_post = [due[0]]
-            leftovers = due[1:]
+            burst_limit = MAX_POSTS_PER_TICK
+            if burst_limit <= 0:
+                to_post = due
+                leftovers = []
+            else:
+                to_post = due[:burst_limit]
+                leftovers = due[burst_limit:]
+            self.log(f"🚀 Processando {len(to_post)} vídeo(s) neste tick.")
+            if leftovers:
+                self.log(f"📦 {len(leftovers)} vídeo(s) reagendado(s) para os próximos minutos.")
             self._reschedule_leftovers(leftovers)
 
             if not self._ensure_logged():
@@ -813,9 +834,13 @@ class TikTokScheduler:
         for t in sorted(set(schedules)):
             self.schedule.every().day.at(t).do(self.scheduled_posting)
             self.log(f"⏰ Tick diário registrado às {t}")
-        # também roda a cada minuto para catch-up de atrasados
+        # Tick de minuto permanece como fallback para garantir execução
         self.schedule.every(1).minutes.do(self.scheduled_posting)
-        self.log("⏱️ Tick de 1 em 1 minuto registrado (catch-up).")
+        self.log("⏱️ Tick de 1 em 1 minuto registrado (fallback).")
+        # também roda com alta frequência para catch-up de atrasados
+        fast_seconds = max(5, FAST_CATCHUP_SECONDS)
+        self.schedule.every(fast_seconds).seconds.do(self.scheduled_posting)
+        self.log(f"⏱️ Tick de catch-up registrado a cada {fast_seconds}s.")
 
     def run_loop(self):
         self.log("🔁 Loop do agendador iniciado")
