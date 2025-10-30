@@ -83,6 +83,43 @@ def _check_admin(user: UserModel) -> None:
         )
 
 
+def _run_manage_command(action_args: List[str], timeout: int = 60) -> Tuple[dict, bool]:
+    """
+    Executa manage.sh tentando sudo sem senha primeiro.
+
+    Retorna (resultado, sudo_falhou) onde sudo_falhou indica que a execução com sudo
+    falhou por falta de configuração (senha requisitada, permissão insuficiente, etc).
+    """
+    sudo_cmd = ["sudo", "-n", str(MANAGE_SH), *action_args]
+    sudo_result = _run_command(sudo_cmd, timeout=timeout)
+
+    if sudo_result["success"]:
+        return sudo_result, False
+
+    stderr_lower = (sudo_result.get("stderr") or "").lower()
+    sudo_failed = any(
+        keyword in stderr_lower
+        for keyword in [
+            "a password is required",
+            "password is required",
+            "a terminal is required",
+            "sudo:",
+            "permission denied",
+            "not in the sudoers",
+        ]
+    )
+
+    fallback_result = _run_command(
+        ["bash", str(MANAGE_SH), *action_args],
+        timeout=timeout,
+    )
+
+    if fallback_result["success"]:
+        sudo_failed = False
+
+    return fallback_result, sudo_failed
+
+
 @router.get("/service/status", response_model=APIResponse[dict])
 async def get_service_status(
     current_user: UserModel = Depends(get_current_active_user),
@@ -179,9 +216,9 @@ async def manage_service(
         )
 
     logger.info(f"User {current_user.username} executando: manage.sh all {action}")
-    result = _run_command(["bash", str(MANAGE_SH), "all", action], timeout=60)
+    result, sudo_failed = _run_manage_command(["all", action], timeout=60)
 
-    return success_response(
+    response = success_response(
         message=f"Comando '{action}' executado",
         data={
             "action": action,
@@ -190,6 +227,12 @@ async def manage_service(
             "error": result["stderr"] if not result["success"] else None,
         }
     )
+
+    if sudo_failed:
+        response.data["sudo_config_required"] = True
+        response.data["hint"] = "Execute sudo bash setup_sudo.sh para configurar sudo sem senha para manage.sh"
+
+    return response
 
 
 @router.get("/git/status", response_model=APIResponse[dict])
@@ -495,18 +538,20 @@ async def update_system(
             })
 
         # Reiniciar serviços
-        restart_result = _run_command(
-            ["bash", str(MANAGE_SH), "all", "restart"],
-            timeout=60
-        )
+        restart_result, sudo_failed = _run_manage_command(["all", "restart"], timeout=60)
         steps.append({
             "step": "restart_services",
             "success": restart_result["success"],
             "output": restart_result["stdout"],
+            "error": restart_result["stderr"] if not restart_result["success"] else None,
+            "sudo_config_required": sudo_failed,
         })
 
         if not restart_result["success"]:
-            errors.append("Falha ao reiniciar serviços")
+            error_msg = "Falha ao reiniciar serviços"
+            if sudo_failed:
+                error_msg += " - execute sudo bash setup_sudo.sh no servidor"
+            errors.append(error_msg)
 
     completed = len(errors) == 0
     message = "Sistema atualizado com sucesso" if completed else "Atualização completada com erros"
@@ -654,28 +699,25 @@ async def complete_reinstall(
 
     # 4. Reiniciar serviços (com sudo)
     logger.info("Reiniciando serviços...")
-    restart_result = _run_command(
-        ["sudo", "bash", str(MANAGE_SH), "all", "restart"],
-        timeout=60
-    )
+    restart_result, sudo_failed = _run_manage_command(["all", "restart"], timeout=60)
 
-    # Se sudo falhou, tentar sem sudo
-    if not restart_result["success"] and "sudo" in restart_result["stderr"].lower():
-        logger.warning("Sudo falhou, tentando sem sudo...")
-        restart_result = _run_command(
-            ["bash", str(MANAGE_SH), "all", "restart"],
-            timeout=60
-        )
+    if sudo_failed:
+        logger.warning("Falha ao executar manage.sh com sudo - execute sudo bash setup_sudo.sh")
 
     steps.append({
         "step": "restart_services",
         "success": restart_result["success"],
         "output": restart_result["stdout"],
-        "message": "Serviços reiniciados" if restart_result["success"] else "Falha ao reiniciar - pode precisar de sudo",
+        "error": restart_result["stderr"] if not restart_result["success"] else None,
+        "sudo_config_required": sudo_failed,
+        "message": "Serviços reiniciados" if restart_result["success"] else "Falha ao reiniciar - configure sudo com setup_sudo.sh",
     })
 
     if not restart_result["success"]:
-        errors.append("Falha ao reiniciar serviços - você pode precisar reiniciar manualmente")
+        error_msg = "Falha ao reiniciar serviços - você pode precisar reiniciar manualmente"
+        if sudo_failed:
+            error_msg += " (execute sudo bash setup_sudo.sh)"
+        errors.append(error_msg)
 
     completed = len(errors) == 0
     message = "Reinstalação completa concluída" if completed else "Reinstalação completada com erros"
