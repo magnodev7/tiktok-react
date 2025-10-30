@@ -26,6 +26,12 @@ export default function Maintenance() {
   const [gitConfig, setGitConfig] = useState(null);
   const [gitLog, setGitLog] = useState([]);
   const [updateLog, setUpdateLog] = useState([]);
+  const [branchData, setBranchData] = useState({ locals: [], remotes: [], current_branch: '' });
+  const [selectedBranch, setSelectedBranch] = useState('');
+  const [branchForce, setBranchForce] = useState(false);
+  const [branchFetch, setBranchFetch] = useState(true);
+  const [branchLog, setBranchLog] = useState([]);
+  const [branchLoading, setBranchLoading] = useState(false);
   const [logs, setLogs] = useState('');
   const [selectedLogService, setSelectedLogService] = useState('backend');
   const [editingGitUrl, setEditingGitUrl] = useState(false);
@@ -73,6 +79,12 @@ export default function Maintenance() {
       loadLogs();
     }
   }, [activeTab, selectedLogService]);
+
+  useEffect(() => {
+    if (activeTab === 'update') {
+      loadBranches();
+    }
+  }, [activeTab]);
 
   const loadServiceStatus = async () => {
     try {
@@ -147,6 +159,30 @@ export default function Maintenance() {
     }
   };
 
+  const loadBranches = async (refresh = false) => {
+    try {
+      const url = refresh ? '/api/maintenance/git/branches?refresh=true' : '/api/maintenance/git/branches';
+      const response = await api.get(url);
+      console.log('[Maintenance] Git branches response:', response.data);
+
+      const payload = response.data?.success === true ? response.data.data : response.data;
+      if (!payload) return;
+
+      setBranchData({
+        locals: payload.locals || [],
+        remotes: payload.remotes || [],
+        current_branch: payload.current_branch || '',
+      });
+
+      if (!selectedBranch) {
+        setSelectedBranch(payload.current_branch || '');
+      }
+    } catch (error) {
+      console.error('Erro ao carregar branches do git:', error);
+      alert('❌ Erro ao carregar branches do repositório');
+    }
+  };
+
   const saveGitConfig = async () => {
     if (!newGitUrl.trim()) {
       alert('❌ URL do repositório não pode estar vazia');
@@ -188,6 +224,49 @@ export default function Maintenance() {
     } catch (error) {
       console.error('Erro ao carregar logs:', error);
       setLogs('Erro ao carregar logs');
+    }
+  };
+
+  const handleBranchCheckout = async () => {
+    if (!selectedBranch) {
+      alert('Selecione um branch antes de continuar.');
+      return;
+    }
+
+    if (!confirm(`Tem certeza que deseja alterar o branch para "${selectedBranch}"?`)) {
+      return;
+    }
+
+    setBranchLoading(true);
+    setBranchLog([]);
+    try {
+      const response = await api.post('/api/maintenance/git/checkout', {
+        branch: selectedBranch,
+        force: branchForce,
+        fetch: branchFetch,
+      });
+
+      console.log('[Maintenance] Git checkout response:', response.data);
+      const payload = response.data?.success === true ? response.data.data : response.data;
+      if (payload?.steps) {
+        setBranchLog(payload.steps);
+      }
+
+      alert(response.data?.message || payload?.message || 'Branch alterado com sucesso!');
+      await loadBranches(false);
+      await loadGitStatus();
+      await loadGitLog();
+    } catch (error) {
+      console.error('Erro ao trocar de branch:', error);
+      const details = error.response?.data;
+      const steps = details?.data?.steps || [];
+      if (steps.length > 0) {
+        setBranchLog(steps);
+      }
+      const message = details?.message || error.message || 'Erro ao trocar de branch';
+      alert(`❌ ${message}`);
+    } finally {
+      setBranchLoading(false);
     }
   };
 
@@ -712,6 +791,136 @@ export default function Maintenance() {
       {/* Update Tab */}
       {activeTab === 'update' && (
         <div className="space-y-6">
+          <Card title="🌿 Gerenciar Branch / Rollback">
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+                <span>
+                  Branch atual:{' '}
+                  <code className="px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded font-mono text-blue-600 dark:text-blue-400">
+                    {branchData.current_branch || 'desconhecido'}
+                  </code>
+                </span>
+                <Button
+                  onClick={() => loadBranches(true)}
+                  disabled={branchLoading}
+                  variant="outline"
+                  size="sm"
+                >
+                  <RefreshCw className="w-4 h-4 mr-1" />
+                  Atualizar lista
+                </Button>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2">
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1 block">
+                    Selecionar branch local
+                  </label>
+                  <select
+                    className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-sm"
+                    value={selectedBranch}
+                    onChange={(e) => setSelectedBranch(e.target.value)}
+                  >
+                    <option value="">-- Escolha um branch local --</option>
+                    {branchData.locals.map((branch) => (
+                      <option key={`local-${branch.name}`} value={branch.name}>
+                        {branch.name} • {branch.subject}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1 block">
+                    Ou escolher branch remoto
+                  </label>
+                  <select
+                    className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-sm"
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      if (value) {
+                        setSelectedBranch(value);
+                      }
+                    }}
+                  >
+                    <option value="">-- Escolha um branch remoto --</option>
+                    {branchData.remotes.map((branch) => (
+                      <option key={`remote-${branch.name}`} value={branch.name}>
+                        {branch.name} • {branch.subject}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-4 text-sm">
+                <label className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
+                  <input
+                    type="checkbox"
+                    className="rounded"
+                    checked={branchFetch}
+                    onChange={(e) => setBranchFetch(e.target.checked)}
+                  />
+                  Atualizar refs remotas (git fetch)
+                </label>
+                <label className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
+                  <input
+                    type="checkbox"
+                    className="rounded"
+                    checked={branchForce}
+                    onChange={(e) => setBranchForce(e.target.checked)}
+                  />
+                  Stash automático (force)
+                </label>
+              </div>
+
+              <div className="flex gap-3">
+                <Button
+                  onClick={handleBranchCheckout}
+                  disabled={branchLoading || !selectedBranch}
+                  className="bg-green-600 hover:bg-green-700"
+                >
+                  <GitBranch className="w-4 h-4 mr-2" />
+                  {branchLoading ? 'Aplicando...' : 'Trocar para o branch selecionado'}
+                </Button>
+                {selectedBranch && (
+                  <div className="flex items-center text-xs text-gray-500 dark:text-gray-400">
+                    Destino: <code className="ml-1 font-mono">{selectedBranch}</code>
+                  </div>
+                )}
+              </div>
+
+              {branchLog.length > 0 && (
+                <div className="bg-gray-50 dark:bg-gray-900/40 border border-gray-200 dark:border-gray-700 rounded-lg p-3 space-y-2">
+                  {branchLog.map((step, index) => (
+                    <div key={`branch-log-${index}`} className="text-sm">
+                      <div className="flex items-center gap-2">
+                        {step.success ? (
+                          <CheckCircle className="w-4 h-4 text-green-600" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 text-red-600" />
+                        )}
+                        <span className="font-medium text-gray-800 dark:text-gray-200">
+                          {step.step}
+                        </span>
+                      </div>
+                      {step.output && (
+                        <pre className="mt-1 text-xs whitespace-pre-wrap text-gray-600 dark:text-gray-400 font-mono">
+                          {step.output}
+                        </pre>
+                      )}
+                      {step.error && (
+                        <p className="mt-1 text-xs text-red-600 dark:text-red-400">
+                          {step.error}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </Card>
+
           {/* Atualização do Sistema */}
           <Card title="🔄 Atualizar Sistema (Recomendado)">
             <div className="mb-4">
