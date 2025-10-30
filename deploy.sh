@@ -493,6 +493,24 @@ setup_backend() {
     python init_db.py
     print_success "Migrações concluídas"
 
+    # Criar diretórios necessários no projeto root
+    print_step "Criando diretórios necessários..."
+    # $SCRIPT_DIR é o diretório raiz do projeto (onde está o deploy.sh)
+    mkdir -p "$SCRIPT_DIR/videos" "$SCRIPT_DIR/posted" "$SCRIPT_DIR/profiles" "$SCRIPT_DIR/state"
+
+    # Criar arquivos JSON iniciais se não existirem
+    if [ ! -f "$SCRIPT_DIR/state/schedules.json" ]; then
+        echo '[]' > "$SCRIPT_DIR/state/schedules.json"
+        print_info "Arquivo schedules.json criado"
+    fi
+
+    if [ ! -f "$SCRIPT_DIR/state/logs.json" ]; then
+        echo '{"logs": []}' > "$SCRIPT_DIR/state/logs.json"
+        print_info "Arquivo logs.json criado"
+    fi
+
+    print_success "Diretórios e arquivos iniciais criados com sucesso"
+
     print_success "Backend configurado com sucesso!"
 }
 
