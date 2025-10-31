@@ -1,1115 +1,442 @@
-# src/uploader.py - Versão FINAL e OTIMIZADA com sessão fresca + cookies locais
+"""
+Uploader SIMPLIFICADO para TikTok
+Baseado no tiktok_bot que funciona sem falhas
+
+Mudanças vs uploader.py (1116 linhas):
+- 75% mais simples (~300 linhas vs 1116)
+- SEM flags de estado complexas (_description_supported, etc)
+- SEM sistema de retry complexo (apenas 2 tentativas)
+- Timeouts REDUZIDOS (5s, 15s, 30s em vez de 8s, 25s, 55s)
+- Seletores SIMPLIFICADOS (menos fallbacks)
+- SEM _wait_upload_ready de 900s (15 min!)
+- Fluxo DIRETO: upload → descrição → publicar
+"""
 import os
 import time
-import json
 from datetime import datetime
-
+from typing import Optional
 
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
     TimeoutException,
-    NoSuchElementException,
     StaleElementReferenceException,
     ElementClickInterceptedException,
-    WebDriverException,
-    InvalidSessionIdException,
 )
 
-# Helpers de driver (precisam existir no src/driver.py)
-from src.driver import get_fresh_driver, is_session_alive, release_driver_lock
-from typing import Dict, List, Optional, Set, Tuple
+# Timeouts RAZOÁVEIS (não extremos)
+WAIT_SHORT = 5
+WAIT_MED = 15
+WAIT_LONG = 30
 
-
-WAIT_SHORT = 8
-WAIT_MED   = 25
-WAIT_LONG  = 55
-
-STUDIO_URL   = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
-CREATOR_URLS = [
-    "https://www.tiktok.com/creator-center/upload",
-    "https://www.tiktok.com/creator-center/content/post",
-]
-CLASSIC_URL  = "https://www.tiktok.com/upload"
-BASE_URL     = "https://www.tiktok.com"
-
-COOKIES_FILE = os.getenv("TIKTOK_COOKIES_FILE", "tiktok_cookies.json")  # raiz do projeto
-
-
-def _now() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
-def _wait_js_ready(driver, timeout=30):
-    WebDriverWait(driver, timeout).until(
-        lambda d: d.execute_script("return document.readyState") == "complete"
-    )
-
-
-def _visible(driver, locator, timeout=WAIT_MED):
-    return WebDriverWait(driver, timeout).until(
-        EC.visibility_of_element_located(locator)
-    )
-
-
-def _present(driver, locator, timeout=WAIT_MED):
-    return WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located(locator)
-    )
-
-
-def _any_of(driver, conditions: List, timeout=WAIT_MED):
-    return WebDriverWait(driver, timeout).until(
-        EC.any_of(*conditions)
-    )
-
-
-def _dump(driver, out_dir, stem):
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-        html = driver.page_source
-        png  = os.path.join(out_dir, f"{stem}.png")
-        htm  = os.path.join(out_dir, f"{stem}.html")
-        with open(htm, "w", encoding="utf-8") as f:
-            f.write(html)
-        driver.save_screenshot(png)
-        return htm, png
-    except Exception:
-        return None, None
-
-
-def _load_cookies_from_file(path: str) -> Optional[List[dict]]:
-    """
-    Suporta:
-      - arquivo contendo uma lista de cookies (padrão do Chrome/DevTools)
-      - arquivo contendo um dict com chave 'cookies' (formato exportado de libs)
-    """
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and "cookies" in data and isinstance(data["cookies"], list):
-            return data["cookies"]
-        # formato desconhecido
-        return None
-    except Exception:
-        return None
-
-
-def _sanitize_cookie_dict(c: dict) -> dict:
-    """
-    Normaliza campos essenciais aceitos pelo Selenium.
-    Ignora atributos problemáticos (sameSite/lax/priority etc.) se presentes.
-    """
-    d = {
-        "name":  c.get("name"),
-        "value": c.get("value"),
-        "path":  c.get("path", "/"),
-        "secure": bool(c.get("secure", True)),
-        "httpOnly": bool(c.get("httpOnly", False)),
-    }
-    # domínio: se vier sem ponto inicial, tudo bem
-    if "domain" in c and c["domain"]:
-        d["domain"] = c["domain"]
-    # expiry opcional (inteiro timestamp)
-    if "expiry" in c and isinstance(c["expiry"], (int, float)):
-        d["expiry"] = int(c["expiry"])
-    return d
-
-
-def _sanitize_text_for_chrome(text: str) -> str:
-    """
-    Remove ou substitui caracteres fora do BMP (Basic Multilingual Plane)
-    que causam erro no ChromeDriver.
-
-    ChromeDriver só suporta caracteres Unicode U+0000 a U+FFFF (BMP).
-    Emojis e outros caracteres acima de U+FFFF causam erro.
-    """
-    if not text:
-        return text
-
-    # Filtra caracteres que estão no BMP (U+0000 a U+FFFF)
-    sanitized = ''.join(char if ord(char) <= 0xFFFF else '' for char in text)
-    return sanitized
+# URLs do TikTok
+STUDIO_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
+CLASSIC_URL = "https://www.tiktok.com/upload"
 
 
 class TikTokUploader:
     """
-    Responsável por:
-      - garantir sessão WebDriver válida (recria se necessário);
-      - (re)aplicar cookies do TikTok a partir de tiktok_cookies.json (raiz do projeto);
-      - abrir a página de upload (robusto, com fallbacks);
-      - enviar o arquivo;
-      - garantir audiência "Everyone";
-      - clicar Publish / Post;
-      - resolver o popup "Continue to post".
+    Uploader SIMPLIFICADO para TikTok (versão compatível).
+    Mantém interface do sistema antigo mas com código simplificado.
+    Faz apenas o essencial: upload → descrição → publicar
     """
-
-    PUBLISH_BUTTON_XPATHS = [
-        "//button[@data-e2e='post_video_button' and not(@disabled)]",
-        "//button[@data-e2e='post_button' and not(@disabled)]",
-        "//button[@type='submit' and contains(normalize-space(.), 'Post')]",
-        "//button[@type='submit' and contains(normalize-space(.), 'Publicar')]",
-        "//div[@role='button' and contains(normalize-space(.), 'Post') and not(@disabled)]",
-        "//div[@role='button' and contains(normalize-space(.), 'Publicar') and not(@disabled)]",
-        "//button[contains(@class, 'btn-post')]",
-        "//button[contains(@class, 'publish')]",
-        "//button[not(@disabled) and not(@data-e2e='discard_post_button') and (contains(normalize-space(.), 'Post') or contains(normalize-space(.), 'Publicar'))]",
-    ]
-
-    SUCCESS_KEYWORDS = [
-        "uploaded successfully",
-        "upload successful",
-        "post successful",
-        "postado com sucesso",
-        "publicado com sucesso",
-        "upload concluído",
-        "upload complete",
-        "has been posted",
-        "foi publicado",
-        "successful",
-    ]
-
-    PROCESSING_KEYWORDS = [
-        "being processed",
-        "is processing",
-        "processing",
-        "processando",
-        "em processamento",
-        "scheduled",
-        "em breve",
-    ]
-
-    UPLOAD_SUCCESS_KEYWORDS = [
-        "upload complete",
-        "upload successful",
-        "upload success",
-        "uploaded",
-        "upload concluído",
-        "upload concluido",
-        "upload concluido!",
-        "upload finalizado",
-        "processado",
-        "processamento concluído",
-        "ready to post",
-    ]
-
-    UPLOAD_FAILURE_KEYWORDS = [
-        "upload failed",
-        "falha no upload",
-        "upload fail",
-        "upload error",
-        "erro de upload",
-        "upload canceled",
-        "upload cancelado",
-        "upload interrompido",
-    ]
-
-    MIN_VIDEO_SIZE_BYTES = 200 * 1024  # 200 KB (configurável, evita uploads vazios)
 
     def __init__(
         self,
         driver,
-        logger=print,
-        debug_dir="/tmp",
-        cookies_path: str = COOKIES_FILE,
-        account_name: str = None,
-        reuse_existing_session: bool = False,
+        logger=None,
+        debug_dir=None,
+        cookies_path=None,
+        account_name=None,
+        reuse_existing_session=True,
+        **kwargs  # Ignora outros parâmetros para compatibilidade
     ):
         self.driver = driver
-        self.log = logger
-        self.debug_dir = debug_dir
-        self.cookies_path = cookies_path
-        self.account_name = account_name  # se fornecido, usa cookies do banco de dados
-        # Quando o scheduler já autenticou a sessão momentos antes, reaproveitamos
-        # os cookies sem tentar reinserir imediatamente. Isso evita múltiplas
-        # chamadas consecutivas de login/cookies que estavam causando timeouts
-        # recorrentes no Chrome headless.
-        self.reuse_existing_session = reuse_existing_session
-        self._initial_session_id = getattr(driver, "session_id", None)
-        self._current_session_id = self._initial_session_id
-        self._cookies_applied = reuse_existing_session
-        # Flags para evitar repetir estratégias que já falharam na sessão atual
-        self._description_supported = True
-        self._audience_supported = True
-        self._description_warning_emitted = False
-        self._audience_warning_emitted = False
-        self._last_caption_selector: Optional[int] = None
+        self.log = logger.info if logger and hasattr(logger, 'info') else (logger if logger else print)
+        self.account_name = account_name
+        # Ignora debug_dir, cookies_path, reuse_existing_session (compatibilidade)
 
-    # -----------------------------
-    # 0) Cookies
-    # -----------------------------
-    def _apply_cookies(self) -> bool:
+    def _wait_element(self, by, value, timeout=WAIT_MED):
+        """Espera elemento aparecer"""
+        return WebDriverWait(self.driver, timeout).until(
+            EC.presence_of_element_located((by, value))
+        )
+
+    def _wait_visible(self, by, value, timeout=WAIT_MED):
+        """Espera elemento ficar visível"""
+        return WebDriverWait(self.driver, timeout).until(
+            EC.visibility_of_element_located((by, value))
+        )
+
+    def _wait_clickable(self, by, value, timeout=WAIT_MED):
+        """Espera elemento ficar clicável"""
+        return WebDriverWait(self.driver, timeout).until(
+            EC.element_to_be_clickable((by, value))
+        )
+
+    def go_to_upload(self) -> bool:
         """
-        Abre o domínio base e injeta cookies.
-        Se account_name for fornecido, usa cookies do banco de dados.
-        Caso contrário, usa arquivo local.
+        Navega para página de upload (SIMPLES).
+
+        Returns:
+            True se conseguiu, False caso contrário
         """
-        # Prioridade 1: Cookies do banco de dados (se account_name fornecido)
-        if self.account_name:
-            try:
-                from src.cookies import load_cookies_for_account
-                success = load_cookies_for_account(self.driver, self.account_name, BASE_URL)
-                if success:
-                    self._cookies_applied = True
-                    return True
-                else:
-                    self.log(f"⚠️ Falha ao carregar cookies do banco para: {self.account_name}")
-            except Exception as e:
-                self.log(f"⚠️ Erro ao carregar cookies do banco: {e}")
+        urls = [STUDIO_URL, CLASSIC_URL]
 
-        # Prioridade 2: Cookies de arquivo (fallback)
-        cookies = _load_cookies_from_file(self.cookies_path)
-        if not cookies:
-            self.log(f"ℹ️ Arquivo de cookies não encontrado ou inválido: {self.cookies_path} (seguindo sem cookies)")
-            return False
+        for url in urls:
+            try:
+                self.log(f"🌐 Acessando: {url}")
+                self.driver.set_page_load_timeout(30)
+                self.driver.get(url)
+                time.sleep(3)
 
-        try:
-            # Precisa estar no domínio para conseguir setar cookies
-            self.driver.set_page_load_timeout(30)
-            self.driver.get(BASE_URL)
-            _wait_js_ready(self.driver, timeout=20)
-            try:
-                self.driver.delete_all_cookies()
-            except Exception:
-                pass
-            try:
-                self.driver.execute_script(
-                    "window.localStorage.clear(); window.sessionStorage.clear();"
-                )
-            except Exception:
-                pass
-        except Exception as e:
-            self.log(f"⚠️ Falha ao abrir domínio base para aplicar cookies: {e}")
-            return False
-
-        ok = 0
-        for c in cookies:
-            try:
-                ck = _sanitize_cookie_dict(c)
-                if not ck.get("name") or ck.get("value") is None:
+                # Verifica se não foi redirecionado para login
+                if "login" in self.driver.current_url.lower():
+                    self.log("⚠️ Redirecionado para login")
                     continue
-                # Se o cookie for de outro domínio, o Chrome/Selenium pode recusar;
-                # nesse caso, tentamos sem especificar 'domain' (aplica no atual).
+
+                # Procura input de arquivo
                 try:
-                    self.driver.add_cookie(ck)
-                except Exception:
-                    ck2 = ck.copy()
-                    ck2.pop("domain", None)
-                    self.driver.add_cookie(ck2)
-                ok += 1
-            except Exception:
+                    self._wait_element(By.CSS_SELECTOR, "input[type='file']", timeout=10)
+                    self.log("✅ Página de upload carregada")
+                    return True
+                except TimeoutException:
+                    self.log("⚠️ Input de arquivo não encontrado")
+                    continue
+
+            except Exception as e:
+                self.log(f"⚠️ Erro ao carregar {url}: {e}")
                 continue
 
-        if ok:
-            try:
-                self.driver.refresh()
-                _wait_js_ready(self.driver, timeout=20)
-            except Exception:
-                pass
-            self._cookies_applied = True
-            self.log(f"🍪 Cookies aplicados ({ok} itens)")
+        self.log("❌ Não consegui abrir página de upload")
+        return False
+
+    def send_file(self, video_path: str) -> bool:
+        """
+        Envia arquivo de vídeo (SIMPLES).
+
+        Args:
+            video_path: Caminho do vídeo
+
+        Returns:
+            True se enviou, False caso contrário
+        """
+        if not os.path.isfile(video_path):
+            self.log(f"❌ Arquivo não encontrado: {video_path}")
+            return False
+
+        # Verifica tamanho mínimo (200KB)
+        size_bytes = os.path.getsize(video_path)
+        if size_bytes < 200 * 1024:
+            self.log(f"❌ Vídeo muito pequeno: {size_bytes} bytes")
+            return False
+
+        # Encontra input de arquivo
+        try:
+            file_input = self._wait_element(By.CSS_SELECTOR, "input[type='file']", timeout=WAIT_MED)
+        except TimeoutException:
+            self.log("❌ Input de arquivo não encontrado")
+            return False
+
+        # Envia arquivo
+        abs_path = os.path.abspath(video_path)
+        file_input.send_keys(abs_path)
+        self.log(f"⬆️ Arquivo enviado: {abs_path}")
+
+        # Aguarda processamento (procura preview ou vídeo)
+        try:
+            WebDriverWait(self.driver, WAIT_LONG).until(
+                EC.any_of(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "video")),
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "canvas")),
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "[class*='preview']")),
+                )
+            )
+            self.log("🎬 Vídeo processado")
+            time.sleep(5)  # Aguarda processamento final
+            return True
+        except TimeoutException:
+            self.log("⚠️ Timeout aguardando processamento")
+            return False
+
+    def fill_description(self, text: str) -> bool:
+        """
+        Preenche descrição (SIMPLES - 2 tentativas apenas).
+
+        Args:
+            text: Texto da descrição
+
+        Returns:
+            True se preencheu, False caso contrário
+        """
+        if not text:
             return True
 
-        self.log("⚠️ Nenhum cookie aplicado (provavelmente incompatíveis com o domínio atual)")
-        return False
+        # Remove emojis fora do BMP (Chrome não suporta)
+        text = ''.join(char if ord(char) <= 0xFFFF else '' for char in text)
 
-    # -----------------------------
-    # 1) Navegação robusta ao upload
-    # -----------------------------
-    def _go_to_upload(self) -> bool:
-        # 🔒 Garante que a sessão está viva antes de navegar
-        self.driver = get_fresh_driver(getattr(self, "driver", None), profile_base_dir=self.debug_dir)
-
-        # Se a sessão mudou (driver foi recriado), precisamos reaplicar cookies
-        session_id = getattr(self.driver, "session_id", None)
-        if session_id != self._current_session_id:
-            self._current_session_id = session_id
-            if session_id != self._initial_session_id:
-                self._cookies_applied = False
-                self._initial_session_id = session_id
-        elif self.reuse_existing_session:
-            # Sessão é a mesma autenticada pelo scheduler (_ensure_logged)
-            self._cookies_applied = True
-
-        # Aplica cookies (se ainda não aplicado nesta instância)
-        if not self._cookies_applied:
-            self._apply_cookies()
-
-        urls = [STUDIO_URL, *CREATOR_URLS, CLASSIC_URL]
-        for attempt in range(1, 4):
-            login_redirected = False
-
-            for url in urls:
-                try:
-                    self.log(f"🌐 Acessando: {url} (tentativa {attempt}/3)")
-                    self.driver.set_page_load_timeout(60)
-                    self.driver.get(url)
-                    _wait_js_ready(self.driver, timeout=30)
-
-                    # Se cair em login, aborta (cookies quebrados/expirados)
-                    if "login" in self.driver.current_url or "signin" in self.driver.current_url:
-                        self.log("🔒 Redirecionado para login; tentando reforçar sessão…")
-                        login_redirected = True
-                        continue
-
-                    # Espera input de arquivo ou área de upload/preview
-                    cand = _any_of(
-                        self.driver,
-                        [
-                            EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='file']")),
-                            EC.presence_of_element_located((By.CSS_SELECTOR, "[class*='upload'], [data-e2e*='upload']")),
-                            EC.presence_of_element_located((By.CSS_SELECTOR, "[class*='preview'], [data-e2e*='preview']")),
-                        ],
-                        timeout=WAIT_MED
-                    )
-                    if cand:
-                        # Rola topo para minimizar overlays
-                        try:
-                            self.driver.execute_script("window.scrollTo(0,0);")
-                        except Exception:
-                            pass
-                        return True
-
-                except TimeoutException:
-                    self.log("⏳ Timeout de carregamento; tentando URL alternativa…")
-
-                except (InvalidSessionIdException, WebDriverException) as e:
-                    # Sessão pode ter morrido entre execuções; recria e tenta de novo
-                    msg = str(e)
-                    if isinstance(e, InvalidSessionIdException) or "invalid session id" in msg.lower():
-                        self.log("♻️ Sessão Selenium inválida. Recriando driver e tentando novamente…")
-                        current_driver = getattr(self, "driver", None)
-                        try:
-                            if is_session_alive(current_driver):
-                                current_driver.quit()
-                        except Exception:
-                            pass
-                        finally:
-                            try:
-                                release_driver_lock(current_driver)
-                            except Exception:
-                                pass
-                        self.driver = get_fresh_driver(None, profile_base_dir=self.debug_dir)
-                        # Reaplica cookies ao recriar
-                        self._cookies_applied = False
-                        self._apply_cookies()
-                        time.sleep(1)
-                        continue
-                    else:
-                        self.log(f"⚠️ Erro de navegação: {e}; reintentando…")
-
-            if login_redirected:
-                self._cookies_applied = False
-                if not self._apply_cookies():
-                    return False
-                # pequena pausa para garantir persistência dos cookies aplicados
-                time.sleep(2)
-                continue
-
-            time.sleep(2)
-
-        self.log("❌ Não consegui abrir a tela de upload.")
-        _dump(self.driver, self.debug_dir, f"upload_open_fail_{_now()}")
-        return False
-
-    # -----------------------------
-    # 2) Upload do arquivo
-    # -----------------------------
-    def _send_file(self, video_path: str) -> bool:
-        # o input pode estar em shadow/oculto; normalmente existe no DOM
-        try:
-            inp = _present(self.driver, (By.CSS_SELECTOR, "input[type='file']"), timeout=WAIT_MED)
-        except TimeoutException:
-            # tenta achar por XPath alternativa
-            try:
-                inp = _present(self.driver, (By.XPATH, "//input[@type='file']"), timeout=WAIT_SHORT)
-            except TimeoutException:
-                self.log("❌ Não encontrei input[type=file].")
-                _dump(self.driver, self.debug_dir, f"nofileinput_{_now()}")
-                return False
-
-        abs_path = os.path.abspath(video_path)
-        inp.send_keys(abs_path)
-        self.log(f"⬆️ Vídeo enviado: {abs_path}")
-
-        # Sinais de processamento/preview
-        try:
-            _any_of(
-                self.driver,
-                [
-                    EC.visibility_of_element_located((By.CSS_SELECTOR, "[class*='preview']")),
-                    EC.visibility_of_element_located((By.XPATH, "//*[contains(text(),'Processing') or contains(text(),'processando') or contains(text(),'Preview')]")),
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "video, canvas")),
-                ],
-                timeout=WAIT_MED
-            )
-            self.log("🎬 Preview/processamento detectado")
-        except TimeoutException:
-            self.log("⚠️ Sem preview evidente; seguindo mesmo assim.")
-        if not self._wait_upload_ready():
-            stem = f"upload_failed_{_now()}"
-            h, p = _dump(self.driver, self.debug_dir, stem)
-            self.log(f"❌ Upload não ficou pronto: dump em {h} / {p}")
-            return False
-        return True
-
-    def _wait_upload_ready(self, timeout: int = 180, max_timeout: int = 900) -> bool:
-        """
-        Observa o status do cartão principal no Studio para confirmar
-        se o upload foi concluído ou falhou.
-        """
-        start_ts = time.time()
-        deadline = start_ts + timeout
-        hard_deadline = start_ts + max_timeout
-        last_status: Optional[str] = None
-        last_status_ts = start_ts
-
-        while time.time() < deadline:
-            try:
-                status_nodes = self.driver.find_elements(
-                    By.XPATH,
-                    "//div[@data-e2e='upload_status_container']//div[contains(@class,'info-status')]"
-                )
-            except Exception:
-                status_nodes = []
-
-            texts = []
-            for node in status_nodes:
-                try:
-                    txt = node.text.strip()
-                    if txt:
-                        texts.append(txt)
-                except StaleElementReferenceException:
-                    continue
-
-            joined = " | ".join(texts) if texts else ""
-            if joined and joined != last_status:
-                self.log(f"ℹ️ Status de upload: {joined}")
-                last_status = joined
-                last_status_ts = time.time()
-                # Enquanto houver progresso recente, estende o deadline (até o limite hard)
-                deadline = min(hard_deadline, last_status_ts + timeout)
-
-            if texts:
-                joined_lower = joined.lower()
-                if any(keyword.lower() in joined_lower for keyword in self.UPLOAD_FAILURE_KEYWORDS):
-                    self.log(f"❌ Status reportou falha no upload: {joined}")
-                    return False
-                if any(keyword.lower() in joined_lower for keyword in self.UPLOAD_SUCCESS_KEYWORDS):
-                    self.log(f"✅ Upload marcado como concluído ({joined})")
-                    return True
-                # Se o status indica progresso contínuo (ex.: "MB" ou "left"), estende temporizador
-                if any(token in joined_lower for token in ("mb/", "%", "left", "remaining", "duration")):
-                    deadline = min(hard_deadline, time.time() + timeout)
-
-            # Também verificamos toasts
-            toasts = self._collect_toast_texts()
-            if toasts:
-                toast_lower = " | ".join(toasts).lower()
-                if any(k.lower() in toast_lower for k in self.UPLOAD_FAILURE_KEYWORDS):
-                    self.log(f"⚠️ Toast reportou falha de upload: {' | '.join(toasts)}")
-                    return False
-                if any(k.lower() in toast_lower for k in self.UPLOAD_SUCCESS_KEYWORDS):
-                    self.log("✅ Upload confirmado via toast")
-                    return True
-
-            time.sleep(2)
-
-        self.log("⚠️ Timeout aguardando status do upload")
-        return False
-
-    def _reset_failed_upload(self) -> bool:
-        """Tenta recuperar a tela de upload após uma falha."""
+        # Seletores mais comuns (ordem de prioridade)
         selectors = [
-            "//button[contains(., 'Replace')]",
-            "//button[contains(., 'Retry')]",
-            "//button[contains(., 'Tentar novamente')]",
+            "div[data-e2e='caption-editor'] div[contenteditable='true']",
+            "div[contenteditable='true'][data-placeholder]",
+            "div[contenteditable='true'][role='textbox']",
         ]
 
         for selector in selectors:
             try:
-                buttons = self.driver.find_elements(By.XPATH, selector)
-            except Exception:
-                buttons = []
+                field = self._wait_visible(By.CSS_SELECTOR, selector, timeout=10)
 
-            for btn in buttons:
+                # Método 1: JavaScript (mais rápido)
                 try:
-                    if btn.is_displayed() and btn.is_enabled():
-                        self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-                        time.sleep(0.2)
-                        try:
-                            btn.click()
-                        except Exception:
-                            self.driver.execute_script("arguments[0].click();", btn)
-                        self.log("🔁 Cliquei em botão de reenvio (Replace/Retry)")
-                        time.sleep(1)
-                        return True
-                except StaleElementReferenceException:
+                    self.driver.execute_script(
+                        """
+                        arguments[0].focus();
+                        arguments[0].innerText = arguments[1];
+                        arguments[0].dispatchEvent(new InputEvent('input', { bubbles: true }));
+                        """,
+                        field,
+                        text,
+                    )
+                    self.log(f"📝 Descrição preenchida ({len(text)} chars)")
+                    time.sleep(1)
+                    return True
+                except:
+                    pass
+
+                # Método 2: send_keys (fallback)
+                try:
+                    field.clear()
+                    field.send_keys(text)
+                    self.log(f"📝 Descrição preenchida via send_keys")
+                    time.sleep(1)
+                    return True
+                except:
+                    pass
+
+            except TimeoutException:
+                continue
+
+        self.log("⚠️ Campo de descrição não encontrado (continuando sem descrição)")
+        return True  # Não falha por causa da descrição
+
+    def set_audience_public(self) -> bool:
+        """
+        Define audiência como pública (SIMPLES).
+
+        Returns:
+            True sempre (não trava se não achar)
+        """
+        try:
+            # Verifica se já está em "Everyone"
+            try:
+                self._wait_element(
+                    By.XPATH,
+                    "//*[contains(text(), 'Everyone') or contains(text(), 'Para todos')]",
+                    timeout=5
+                )
+                self.log("🔧 Audiência já é pública")
+                return True
+            except TimeoutException:
+                pass
+
+            # Tenta abrir seletor e escolher "Everyone"
+            selectors = [
+                "//div[@data-e2e='audience-selector']",
+                "//div[contains(text(), 'Who can watch')]",
+            ]
+
+            for selector in selectors:
+                try:
+                    opener = self._wait_clickable(By.XPATH, selector, timeout=5)
+                    opener.click()
+                    time.sleep(1)
+
+                    # Seleciona "Everyone"
+                    option = self._wait_clickable(
+                        By.XPATH,
+                        "//*[contains(text(), 'Everyone') or contains(text(), 'Para todos')]",
+                        timeout=5
+                    )
+                    option.click()
+                    self.log("🔧 Audiência definida como pública")
+                    return True
+                except:
                     continue
 
-        # Se não houver botão específico, recarrega a página
-        try:
-            self.driver.refresh()
-            _wait_js_ready(self.driver, timeout=30)
-            self.log("🔁 Tela de upload recarregada para nova tentativa")
-            return True
-        except Exception as exc:
-            self.log(f"⚠️ Falha ao recarregar tela de upload: {exc}")
-            return False
+            self.log("ℹ️ Não consegui alterar audiência (seguindo sem alteração)")
+            return True  # Não falha por causa disso
 
-    # -----------------------------
-    # 3) Preencher descrição
-    # -----------------------------
-    def _find_caption_field(self, timeout: int = 25):
-        """Localiza o campo de descrição usando busca rápida com fallback em JS."""
-        selectors: List[Tuple[str, str]] = [
-            (By.CSS_SELECTOR, "div[data-e2e='caption-editor'] div[contenteditable='true']"),
-            (By.CSS_SELECTOR, "div[data-e2e='caption'] div[contenteditable='true']"),
-            (By.CSS_SELECTOR, "div[contenteditable='true'][data-placeholder]"),
-            (By.XPATH, "//div[@contenteditable='true' and @role='textbox']"),
-            (By.CSS_SELECTOR, "textarea[data-e2e='caption-textarea']"),
-            (By.CSS_SELECTOR, "textarea"),
+        except Exception as e:
+            self.log(f"⚠️ Erro ao definir audiência: {e} (continuando)")
+            return True
+
+    def click_publish(self) -> bool:
+        """
+        Clica no botão de publicar (SIMPLES).
+
+        Returns:
+            True se clicou, False caso contrário
+        """
+        # Rola até o final da página
+        try:
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+        except:
+            pass
+
+        # Seletores do botão (ordem de prioridade)
+        publish_selectors = [
+            "//button[@data-e2e='post_video_button' and not(@disabled)]",
+            "//button[@data-e2e='post_button' and not(@disabled)]",
+            "//button[contains(normalize-space(.), 'Post') and not(@disabled)]",
+            "//button[contains(normalize-space(.), 'Publicar') and not(@disabled)]",
         ]
 
-        css_selectors = [value for by, value in selectors if by == By.CSS_SELECTOR]
-        end_time = time.time() + timeout
-        last_progress_log = 0.0
-
-        while time.time() < end_time:
-            for idx, (by, value) in enumerate(selectors, 1):
-                try:
-                    elements = self.driver.find_elements(by, value)
-                except Exception:
-                    elements = []
-
-                for el in elements:
-                    try:
-                        if el.is_displayed():
-                            if self._last_caption_selector != idx:
-                                self.log(f"✅ Campo de descrição encontrado (seletor {idx})")
-                                self._last_caption_selector = idx
-                            return el
-                    except StaleElementReferenceException:
-                        continue
-
-            # Fallback em JS (principalmente quando o React reconstrói o DOM)
-            if css_selectors:
-                try:
-                    js_result = self.driver.execute_script(
-                        """
-                        const selectors = arguments[0];
-                        const isVisible = el => !!(el && el.offsetParent !== null);
-                        for (const sel of selectors) {
-                            const el = document.querySelector(sel);
-                            if (isVisible(el)) {
-                                return el;
-                            }
-                        }
-                        const iframes = document.querySelectorAll('iframe');
-                        for (const frame of iframes) {
-                            try {
-                                const doc = frame.contentDocument;
-                                if (!doc) continue;
-                                for (const sel of selectors) {
-                                    const el = doc.querySelector(sel);
-                                    if (isVisible(el)) {
-                                        return el;
-                                    }
-                                }
-                            } catch (err) {
-                                continue;
-                            }
-                        }
-                        return null;
-                        """,
-                        css_selectors,
-                    )
-                    if js_result:
-                        self.log("✅ Campo de descrição encontrado via querySelector")
-                        self._last_caption_selector = 0
-                        return js_result
-                except Exception:
-                    pass
-
-            now = time.time()
-            if now - last_progress_log > 5:
-                self.log("⏳ Aguardando campo de descrição aparecer…")
-                last_progress_log = now
-            time.sleep(0.5)
-
-        return None
-
-    def _fill_description(self, text: str):
-        """
-        Preenche campo de descrição com timeout e fallbacks robustos.
-        Se falhar completamente, continua sem travar (descrição é opcional).
-        """
-        if not self._description_supported:
-            if not self._description_warning_emitted:
-                self.log("⏭️ Descrição pulada (campo não disponível em execuções anteriores)")
-                self._description_warning_emitted = True
-            return
-        try:
-            # Sanitiza texto para remover caracteres fora do BMP
-            text = _sanitize_text_for_chrome(text)
-            self.log("🔍 Buscando campo de descrição (timeout ~25s)…")
-
-            box = self._find_caption_field(timeout=25)
-            if not box:
-                self._description_supported = False
-                if not self._description_warning_emitted:
-                    self.log("⚠️ Não achei campo de descrição; prosseguindo sem descrição")
-                    self._description_warning_emitted = True
-                return
-
+        for selector in publish_selectors:
             try:
-                # foco no campo para facilitar eventos
-                self.driver.execute_script("arguments[0].focus();", box)
-                self.log("🔍 Campo focado, preenchendo via JS...")
+                btn = self._wait_clickable(By.XPATH, selector, timeout=5)
 
-                # Usa JS para preencher e disparar eventos React/Input
+                # Rola até o botão
                 self.driver.execute_script(
-                    """
-                    const el = arguments[0];
-                    const value = arguments[1];
-                    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-                        el.value = value;
-                        const inputEvt = new Event('input', { bubbles: true });
-                        const changeEvt = new Event('change', { bubbles: true });
-                        el.dispatchEvent(inputEvt);
-                        el.dispatchEvent(changeEvt);
-                    } else {
-                        el.innerText = value;
-                        const inputEvt = new InputEvent('input', { bubbles: true });
-                        el.dispatchEvent(inputEvt);
-                    }
-                    """,
-                    box,
-                    text,
+                    "arguments[0].scrollIntoView({block: 'center'});", btn
                 )
-
-                # Como fallback, garante que o campo tem conteúdo
                 time.sleep(0.5)
-                if not box.text.strip():
-                    self.log("🔍 Campo vazio após JS, usando send_keys...")
-                    box.clear()
-                    box.send_keys(text)
 
-                self.log("📝 Descrição preenchida com sucesso")
-            except Exception as exc:
-                self.log(f"⚠️ Falha ao preencher descrição via JS: {exc}; tentando fallback")
-                try:
-                    box.clear()
-                except Exception:
-                    pass
-
-                # Fallback: digitação lenta (com limite de tempo)
-                chars_written = 0
-                max_chars = min(len(text), 500)  # Limita para evitar travamento
-                for ch in text[:max_chars]:
-                    try:
-                        box.send_keys(ch)
-                        chars_written += 1
-                    except Exception as e:
-                        if chars_written > 10:
-                            # Se já escreveu algo, continua
-                            self.log(f"⚠️ Erro ao escrever caractere {chars_written}: {e}, continuando...")
-                            break
-                        time.sleep(0.05)
-                        try:
-                            box.send_keys(ch)
-                            chars_written += 1
-                        except:
-                            break
-                    time.sleep(0.003)
-
-                if chars_written > 0:
-                    self.log(f"📝 Descrição preenchida parcialmente ({chars_written} caracteres)")
-                else:
-                    self.log("⚠️ Não foi possível preencher descrição (continuando sem descrição)")
-
-        except Exception as outer_exc:
-            # Captura QUALQUER erro não tratado para evitar travamento
-            self.log(f"⚠️ Erro crítico ao preencher descrição: {outer_exc}")
-            self.log("⏭️ Continuando sem descrição para não travar a postagem")
-            self._description_supported = False
-            self._description_warning_emitted = True
-
-    # -----------------------------
-    # 4) Garantir audiência pública (sem abrir dropdown à toa)
-    # -----------------------------
-    def _ensure_public_audience(self):
-        if not self._audience_supported:
-            if not self._audience_warning_emitted:
-                self.log("⏭️ Ajuste de audiência pulado (não suportado neste layout)")
-                self._audience_warning_emitted = True
-            return
-        # Detecta se já está em "Everyone/Para todos" usando data-e2e e texto
-        public_indicators = [
-            (By.XPATH, "//*[(@data-e2e='audience-selector' or contains(@class,'select') or contains(@class,'selector')) and (.//text()[contains(.,'Everyone') or contains(.,'Para todos')])]"),
-            (By.XPATH, "//div[@data-e2e='view-permission' and contains(.,'Everyone')]"),
-        ]
-        for loc in public_indicators:
-            try:
-                summary = _visible(self.driver, loc, timeout=10)
-                if summary:
-                    self.log("🔧 Audiência já está em 'Everyone'")
-                    return
-            except TimeoutException:
-                pass
-
-        # Abre o seletor apenas se necessário
-        openers = [
-            (By.XPATH, "//div[@data-e2e='audience-selector']"),
-            (By.XPATH, "//*[contains(text(),'Who can watch this video') or contains(text(),'Quem pode assistir')]/following::div[@role='combobox' or contains(@class,'select')][1]"),
-            (By.XPATH, "//div[contains(@class,'select')]//div[contains(@class,'value') or contains(@class,'selected')]"),
-        ]
-        opener = None
-        for loc in openers:
-            try:
-                opener = _visible(self.driver, loc, timeout=10)
-                if opener:
-                    try:
-                        opener.click()
-                    except Exception:
-                        self.driver.execute_script("arguments[0].click();", opener)
-                    time.sleep(1)
-                    self.log("🔍 Dropdown de audiência aberto")
-                    break
-            except TimeoutException:
-                continue
-
-        if not opener:
-            self._audience_supported = False
-            if not self._audience_warning_emitted:
-                self.log("⚠️ Não encontrei o seletor de audiência; prosseguindo sem alteração.")
-                self._audience_warning_emitted = True
-            return
-
-        # Seleciona "Everyone / Para todos"
-        opts = [
-            (By.XPATH, "//div[@data-e2e='everyone-option' or @role='option' or @role='menuitem' or @role='listitem'][.//text()[contains(.,'Everyone') or contains(.,'Para todos')]]"),
-            (By.XPATH, "//*[contains(@data-e2e,'option') and (contains(.,'Everyone') or contains(.,'Para todos'))]"),
-        ]
-        for loc in opts:
-            try:
-                opt = _visible(self.driver, loc, timeout=10)
-                if opt:
-                    try:
-                        opt.click()
-                    except Exception:
-                        self.driver.execute_script("arguments[0].click();", opt)
-                    self.log("🔧 Audiência definida para Público")
-                    return
-            except TimeoutException:
-                continue
-
-        self._audience_supported = False
-        if not self._audience_warning_emitted:
-            self.log("ℹ️ Não consegui alterar audiência (seguindo assim).")
-            self._audience_warning_emitted = True
-
-    # -----------------------------
-    # 5) Botão de “Post/Publish”
-    # -----------------------------
-    def _find_publish_button(self):
-        """Encontra o botão de publicação com múltiplos seletores atualizados."""
-        for selector in self.PUBLISH_BUTTON_XPATHS:
-            try:
-                btn = WebDriverWait(self.driver, 5).until(
-                    EC.element_to_be_clickable((By.XPATH, selector))
-                )
-                if btn and btn.is_enabled():
-                    return btn
-            except TimeoutException:
-                continue
-        
-        return None
-
-    def _dismiss_exit_modal_if_present(self) -> bool:
-        """Detecta o modal 'Are you sure you want to exit?' e clica em Cancel."""
-        try:
-            WebDriverWait(self.driver, 2).until(
-                EC.presence_of_element_located(
-                    (By.XPATH, "//div[contains(@class,'modal') and contains(., 'Are you sure you want to exit')]")
-                )
-            )
-        except TimeoutException:
-            return False
-
-        try:
-            cancel = WebDriverWait(self.driver, 2).until(
-                EC.element_to_be_clickable(
-                    (By.XPATH, "//button[contains(normalize-space(.), 'Cancel') or contains(normalize-space(.), 'Cancelar')]")
-                )
-            )
-            cancel.click()
-            self.log("ℹ️ Modal de saída detectado e cancelado")
-            return True
-        except TimeoutException:
-            # Se não achou botão, tenta apertar ESC
-            try:
-                self.driver.switch_to.active_element.send_keys(Keys.ESCAPE)
-            except Exception:
-                pass
-            return True
-
-    def _click_publish(self) -> bool:
-        """Tenta clicar no botão de publicação."""
-        try:
-            btn = self._find_publish_button()
-            if not btn:
-                self.log("❌ Não encontrei o botão de publicação")
-                return False
-
-            # Rola até o botão
-            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-            time.sleep(0.5)
-            
-            # Tenta clicar de várias formas
-            for _ in range(3):
+                # Tenta clicar
                 try:
                     btn.click()
-                    time.sleep(0.5)
-                    if self._dismiss_exit_modal_if_present():
-                        self.log("ℹ️ Modal de saída interceptou clique; tentando novamente…")
-                        btn = self._find_publish_button()
-                        if not btn:
-                            self.log("❌ Botão de publicação sumiu após fechar modal")
-                            return False
-                        continue
-                    self.log("🖱️ Clique de publicação enviado")
-                    return True
-                except (ElementClickInterceptedException, StaleElementReferenceException):
-                    try:
-                        self.driver.execute_script("arguments[0].click();", btn)
-                        time.sleep(0.5)
-                        if self._dismiss_exit_modal_if_present():
-                            self.log("ℹ️ Modal de saída interceptou clique (JS); tentando novamente…")
-                            btn = self._find_publish_button()
-                            if not btn:
-                                self.log("❌ Botão de publicação sumiu após fechar modal (JS)")
-                                return False
-                            continue
-                        self.log("🖱️ Clique JS de publicação enviado")
-                        return True
-                    except Exception:
-                        time.sleep(1)
+                except:
+                    self.driver.execute_script("arguments[0].click();", btn)
 
-            self.log("❌ Falha ao clicar no botão de publicação")
-            return False
-            
-        except Exception as e:
-            self.log(f"⚠️ Erro ao clicar no botão de publicação: {e}")
-            return False
-
-    # -----------------------------
-    # 6) Pop-up “Continue to post?”
-    # -----------------------------
-    def _handle_continue_dialog(self) -> bool:
-        """Lida com o modal de confirmação de publicação."""
-        try:
-            # Espera o modal aparecer (ou não)
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located(
-                    (By.XPATH,
-                     "//div[contains(@class, 'modal') or contains(@class, 'dialog')]//button[contains(., 'Post') or contains(., 'Publicar') or contains(., 'Continue') or contains(., 'Continuar')]"
-                    )
-                )
-            )
-        except TimeoutException:
-            return True  # não apareceu
-
-        selectors = [
-            "//button[contains(., 'Post') and not(@disabled)]",
-            "//button[contains(., 'Publicar') and not(@disabled)]",
-            "//button[contains(., 'Continue') and not(@disabled)]",
-            "//button[contains(., 'Continuar') and not(@disabled)]",
-            "//div[@role='button' and contains(., 'Post')]",
-            "//div[@role='button' and contains(., 'Publicar')]",
-        ]
-        
-        for selector in selectors:
-            try:
-                btn = WebDriverWait(self.driver, 5).until(
-                    EC.element_to_be_clickable((By.XPATH, selector))
-                )
-                btn.click()
-                self.log("✅ Modal de confirmação resolvido")
+                self.log("🚀 Botão de publicar clicado")
+                time.sleep(3)
                 return True
+
             except TimeoutException:
                 continue
-        
-        self.log("⚠️ Modal presente mas sem botão clicável.")
+            except ElementClickInterceptedException:
+                # Tenta JS click se normal falhar
+                try:
+                    self.driver.execute_script("arguments[0].click();", btn)
+                    self.log("🚀 Botão de publicar clicado (via JS)")
+                    time.sleep(3)
+                    return True
+                except:
+                    continue
+
+        self.log("❌ Botão de publicar não encontrado")
         return False
 
-    # -----------------------------
-    # 7) Confirmação de publicação
-    # -----------------------------
-    def _collect_toast_texts(self) -> List[str]:
-        """Retorna texto dos toasts do novo sistema (Sonner)."""
-        texts: List[str] = []
+    def handle_confirmation_dialog(self) -> bool:
+        """
+        Lida com modal de confirmação "Continue to post?" (SIMPLES).
+
+        Returns:
+            True se lidou ou não apareceu, False se falhou
+        """
         try:
-            for toast in self.driver.find_elements(By.CSS_SELECTOR, "[data-sonner-toast]"):
-                content = toast.text.strip()
-                if content:
-                    texts.append(content)
-        except Exception:
-            pass
-        return texts
+            # Espera modal aparecer (ou não)
+            WebDriverWait(self.driver, 5).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, "//button[contains(., 'Post') or contains(., 'Continue')]")
+                )
+            )
 
-    def _publish_button_still_visible(self) -> bool:
-        """Verifica se o botão de publicar ainda está acessível/visível."""
-        try:
-            for selector in self.PUBLISH_BUTTON_XPATHS:
-                elements = self.driver.find_elements(By.XPATH, selector)
-                for element in elements:
-                    try:
-                        if element.is_displayed():
-                            return True
-                    except StaleElementReferenceException:
-                        continue
-            return False
-        except Exception:
-            return False
+            # Clica no botão de confirmar
+            confirm_btn = self._wait_clickable(
+                By.XPATH,
+                "//button[contains(., 'Post') or contains(., 'Continue') or contains(., 'Publicar')]",
+                timeout=5
+            )
+            confirm_btn.click()
+            self.log("✅ Modal de confirmação resolvido")
+            time.sleep(2)
+            return True
 
-    def _has_keyword(self, source: List[str], keywords: List[str]) -> bool:
-        lowered = [text.lower() for text in source]
-        for keyword in keywords:
-            if keyword.lower() in "".join(lowered):
-                return True
-        return False
+        except TimeoutException:
+            # Modal não apareceu (tudo bem)
+            return True
+        except Exception as e:
+            self.log(f"⚠️ Erro no modal de confirmação: {e}")
+            return True  # Não falha por causa disso
 
-    def _confirm_posted(self) -> bool:
-        """Confirma se o vídeo foi publicado com base em múltiplos sinais."""
-        deadline = time.time() + 120  # dá tempo para processamento/renderizações novas
-        last_log: Optional[str] = None
+    def confirm_posted(self) -> bool:
+        """
+        Confirma se vídeo foi publicado (SIMPLES).
+
+        Returns:
+            True se publicou, False caso contrário
+        """
+        # Aguarda até 60s para confirmação
+        deadline = time.time() + 60
 
         while time.time() < deadline:
             try:
-                current_url = self.driver.current_url
-            except Exception:
-                current_url = ""
-
-            if "/post" in current_url or "/content" in current_url:
-                return True
-
-            toasts = self._collect_toast_texts()
-            if toasts:
-                if self._has_keyword(toasts, self.SUCCESS_KEYWORDS):
-                    self.log("✅ Toast de sucesso detectado")
+                # Verifica se mudou de URL (sinal de sucesso)
+                current_url = self.driver.current_url.lower()
+                if "/post" in current_url or "/content" in current_url:
+                    self.log("✅ URL mudou - vídeo publicado!")
                     return True
-                if self._has_keyword(toasts, self.PROCESSING_KEYWORDS):
-                    msg = "ℹ️ TikTok sinalizou processamento; aguardando confirmação final..."
-                    if last_log != msg:
-                        self.log(msg)
-                        last_log = msg
 
-            if not self._publish_button_still_visible():
-                # Botão sumiu; considerado sucesso
-                self.log("✅ Botão de publicação não está mais visível")
-                return True
+                # Verifica se botão de publicar sumiu
+                buttons = self.driver.find_elements(By.XPATH, "//button[@data-e2e='post_video_button']")
+                if not any(btn.is_displayed() for btn in buttons if btn):
+                    self.log("✅ Botão sumiu - vídeo publicado!")
+                    return True
+
+            except:
+                pass
 
             time.sleep(2)
 
-        self.log("⚠️ Tempo excedido aguardando confirmação de publicação")
+        self.log("⚠️ Timeout aguardando confirmação")
         return False
 
-    # -----------------------------
-    # API pública
-    # -----------------------------
-    def post_video(self, video_path: str, description: str) -> bool:
-        # 🔒 Antes de tudo, garanta uma sessão viva (protege contra sessão zumbi)
-        self.driver = get_fresh_driver(getattr(self, "driver", None), profile_base_dir=self.debug_dir)
-        # (Re)aplica cookies se for um driver recém-criado
-        if not self._cookies_applied:
-            self._apply_cookies()
+    def post_video(self, video_path: str, description: str = "") -> bool:
+        """
+        Publica vídeo completo (SIMPLES - fluxo direto).
 
-        if not os.path.isfile(video_path):
-            self.log(f"❌ Arquivo de vídeo não encontrado: {video_path}")
+        Args:
+            video_path: Caminho do vídeo
+            description: Descrição do vídeo
+
+        Returns:
+            True se publicou, False caso contrário
+        """
+        self.log(f"📹 Iniciando publicação: {os.path.basename(video_path)}")
+
+        # 1. Vai para página de upload
+        if not self.go_to_upload():
             return False
 
-        size_bytes = os.path.getsize(video_path)
-        if size_bytes < self.MIN_VIDEO_SIZE_BYTES:
-            self.log(f"❌ Vídeo muito pequeno ({size_bytes} bytes). Abortando upload e mantendo arquivo na fila.")
+        # 2. Envia arquivo (com 1 retry se falhar)
+        if not self.send_file(video_path):
+            self.log("🔁 Tentando enviar novamente...")
+            time.sleep(3)
+            if not self.send_file(video_path):
+                self.log("❌ Falha no upload após retry")
+                return False
+
+        # 3. Preenche descrição
+        if description:
+            self.fill_description(description)
+
+        # 4. Define audiência como pública
+        self.set_audience_public()
+
+        # 5. Clica em publicar
+        if not self.click_publish():
             return False
 
-        # 1) ir para upload
-        if not self._go_to_upload():
-            self.log("❌ Falha ao abrir tela de upload.")
-            return False
+        # 6. Lida com modal de confirmação
+        self.handle_confirmation_dialog()
 
-        # 2) enviar arquivo (com tentativas extras se necessário)
-        upload_ok = False
-        for attempt in range(1, 4):
-            if self._send_file(video_path):
-                upload_ok = True
-                break
-
-            if attempt >= 3:
-                break
-
-            self.log(f"🔁 Upload falhou (tentativa {attempt}/3). Preparando nova tentativa…")
-            if not self._reset_failed_upload():
-                break
-
-        if not upload_ok:
-            self.log("❌ Upload não pôde ser concluído após múltiplas tentativas.")
-            return False
-
-        self.log(f"✏️ Preparando descrição (tamanho: {len(description)} caracteres)")
-
-        # 3) descrição
-        try:
-            self._fill_description(description)
-            self.log("✅ Descrição tratada")
-        except Exception as desc_error:
-            self.log(f"⚠️ Erro ao processar descrição: {desc_error} (continuando)")
-
-        # 4) audiência = Everyone (sem travar no select)
-        try:
-            self.log("🔧 Ajustando audiência para 'Everyone'")
-            self._ensure_public_audience()
-            self.log("✅ Audiência verificada")
-        except Exception as audience_error:
-            self.log(f"⚠️ Erro ao ajustar audiência: {audience_error} (continuando)")
-
-        # 5) publicar
-        self.log("🚀 Tentando clicar em 'Publicar'")
-        if not self._click_publish():
-            stem = f"publish_not_found_{_now()}"
-            h, p = _dump(self.driver, self.debug_dir, stem)
-            self.log(f"🧪 Dump salvo: {h} / {p}")
-            return False
-        self.log("✅ Solicitação de publicação enviada")
-
-        # 6) lidar com popup “Continue to post?”
-        if not self._handle_continue_dialog():
-            stem = f"cm_unhandled_{_now()}"
-            h, p = _dump(self.driver, self.debug_dir, stem)
-            self.log(f"🧪 Dump salvo: {h} / {p}")
-            return False
-        self.log("✅ Modal de confirmação tratado (se presente)")
-
-        # 7) confirmar
-        self.log("⏳ Aguardando confirmação de publicação...")
-        if self._confirm_posted():
+        # 7. Confirma publicação
+        if self.confirm_posted():
+            self.log("🎉 Vídeo publicado com sucesso!")
             return True
-
-        # 8) *retry leve*: clica de novo e espera curto + dump
-        self.log("⚠️ Sem confirmação; reenviando clique de Post e aguardando curto…")
-        self._click_publish()
-        if self._confirm_posted():
-            return True
-
-        stem = f"publish_unconfirmed_{_now()}"
-        h, p = _dump(self.driver, self.debug_dir, stem)
-        self.log(f"🧪 Dump salvo: {h} / {p}")
-        return False
+        else:
+            self.log("⚠️ Publicação não confirmada (pode ter sido publicado)")
+            return False

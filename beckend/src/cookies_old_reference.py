@@ -1,0 +1,572 @@
+import json
+import time
+import logging
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+from urllib.parse import urlparse
+
+from selenium.webdriver.remote.webdriver import WebDriver
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
+from datetime import datetime, timezone
+
+from .account_storage import AccountStorage
+
+logger = logging.getLogger("cookies")
+
+
+def _normalise_domain(raw: Optional[str]) -> str:
+    """Normalise cookie domain so Selenium/Chrome accept it."""
+    if not raw:
+        return ".tiktok.com"
+
+    domain = raw.strip()
+    if not domain:
+        return ".tiktok.com"
+
+    if domain.startswith("http://") or domain.startswith("https://"):
+        domain = urlparse(domain).netloc or domain
+
+    # Remove leading dots just to reapply a single canonical dot afterwards
+    domain = domain.lstrip(".")
+
+    if not domain:
+        return ".tiktok.com"
+
+    # TikTok usa múltiplos subdomínios, mas o ponto inicial garante abrangência
+    if not domain.startswith("."):
+        domain = f".{domain}"
+
+    return domain
+
+
+def _coerce_same_site(value: Optional[Any]) -> Optional[str]:
+    if value is None:
+        return None
+
+    mapping = {
+        "unspecified": None,
+        "no_restriction": "None",
+        "none": "None",
+        "lax": "Lax",
+        "strict": "Strict",
+    }
+
+    stringified = str(value).strip().lower()
+    return mapping.get(stringified, None)
+
+
+def _normalise_cookie_entry(cookie: Dict[str, Any]) -> Dict[str, Any]:
+    """Converte a estrutura de cookie (possivelmente heterogênea) no formato aceito pelo Selenium."""
+    normalised: Dict[str, Any] = {}
+
+    name = cookie.get("name")
+    value = cookie.get("value")
+    if not name or value is None:
+        return {}
+
+    normalised["name"] = str(name)
+    normalised["value"] = str(value)
+
+    normalised["domain"] = _normalise_domain(cookie.get("domain"))
+    normalised["path"] = cookie.get("path") or "/"
+
+    same_site = _coerce_same_site(
+        cookie.get("sameSite")
+        or cookie.get("same_site")
+        or cookie.get("same_site_policy")
+    )
+    if same_site:
+        normalised["sameSite"] = same_site
+
+    secure = cookie.get("secure")
+    if secure is None:
+        # Cookies de autenticação do TikTok são sempre "secure"
+        secure = True
+    normalised["secure"] = bool(secure)
+
+    http_only = cookie.get("httpOnly")
+    if http_only is not None:
+        normalised["httpOnly"] = bool(http_only)
+
+    expires = cookie.get("expires", cookie.get("expiry"))
+    if expires:
+        try:
+            # Aceita int/float/string representando timestamp em segundos
+            normalised["expiry"] = int(float(expires))
+        except (TypeError, ValueError):
+            pass
+
+    # Remove campos que costumam quebrar a API do Selenium
+    for noisy in ("expirationDate", "hostOnly", "creation_utc", "priority"):
+        if noisy in normalised:
+            normalised.pop(noisy, None)
+
+    return normalised
+
+
+def _flatten_cookie_collection(raw: Any) -> List[Dict[str, Any]]:
+    """Extrai entradas de cookies de estruturas aninhadas ou formatos exportados."""
+    flat: List[Dict[str, Any]] = []
+    stack: List[Any] = [raw]
+
+    while stack:
+        current = stack.pop()
+        if current is None:
+            continue
+        if isinstance(current, list):
+            stack.extend(current)
+            continue
+        if isinstance(current, dict):
+            # Formato direto
+            value = current.get("value")
+            if current.get("name") and not isinstance(value, (list, dict)):
+                flat.append(current)
+
+            # Formatos "cookies": [...]
+            candidate = current.get("cookies")
+            if candidate is not None:
+                stack.append(candidate)
+
+            # Alguns exportadores aninham os cookies dentro do campo value (ex.: EditThisCookie)
+            if isinstance(value, (list, dict)):
+                stack.append(value)
+
+            continue
+
+    return flat
+
+
+def _apply_web_storage(driver: WebDriver, storage_map: Dict[str, str], storage_kind: str) -> None:
+    """Restaura localStorage/sessionStorage a partir dos valores persistidos."""
+    if not storage_map:
+        return
+
+    try:
+        driver.execute_script(
+            """
+            const data = arguments[0];
+            const storageName = arguments[1];
+            const storage = window[storageName];
+            if (!storage) {
+                return;
+            }
+            try {
+                storage.clear();
+            } catch (err) {
+                // Pode falhar em contextos restritos; ignora
+            }
+            for (const [key, value] of Object.entries(data)) {
+                if (typeof key !== "string") {
+                    continue;
+                }
+                try {
+                    storage.setItem(key, value ?? "");
+                } catch (err) {
+                    // Ignora chaves que não podem ser persistidas
+                }
+            }
+            """,
+            storage_map,
+            storage_kind,
+        )
+        logger.info("📦 %s restaurado (%d itens)", storage_kind, len(storage_map))
+        print(f"📦 {storage_kind} restaurado ({len(storage_map)} itens)")
+    except Exception as exc:
+        logger.debug("Falha ao restaurar %s: %s", storage_kind, exc)
+
+
+def _dump_web_storage(driver: WebDriver, storage_kind: str) -> Dict[str, str]:
+    """Captura conteúdo de localStorage/sessionStorage."""
+    try:
+        data = driver.execute_script(
+            """
+            const storageName = arguments[0];
+            const storage = window[storageName];
+            if (!storage) {
+                return {};
+            }
+            const out = {};
+            for (let i = 0; i < storage.length; i += 1) {
+                const key = storage.key(i);
+                if (key === null) {
+                    continue;
+                }
+                out[key] = storage.getItem(key);
+            }
+            return out;
+            """,
+            storage_kind,
+        )
+        if isinstance(data, dict):
+            normalized = {}
+            for key, value in data.items():
+                if key is None:
+                    continue
+                normalized[str(key)] = "" if value is None else str(value)
+            return normalized
+    except Exception as exc:
+        logger.debug("Falha ao capturar %s: %s", storage_kind, exc)
+    return {}
+
+
+def _set_cookie_via_cdp(driver: WebDriver, cookie: Dict[str, Any], base_url: str) -> bool:
+    """Fallback para injetar cookies via CDP quando add_cookie falha."""
+    try:
+        driver.execute_cdp_cmd("Network.enable", {})
+        domain = cookie["domain"].lstrip(".") or "www.tiktok.com"
+        payload = {
+            "name": cookie["name"],
+            "value": cookie["value"],
+            "domain": domain,
+            "path": cookie.get("path", "/"),
+            "secure": cookie.get("secure", False),
+            "httpOnly": cookie.get("httpOnly", False),
+        }
+
+        same_site = cookie.get("sameSite")
+        if same_site:
+            payload["sameSite"] = same_site
+
+        expiry = cookie.get("expiry")
+        if expiry:
+            payload["expires"] = int(expiry)
+
+        # Quando o domínio é genérico (.tiktok.com), o CDP exige uma URL de contexto
+        cookie_url = base_url
+        if domain:
+            cookie_url = f"https://{domain.strip('/')}/"
+        payload.setdefault("url", cookie_url)
+
+        driver.execute_cdp_cmd("Network.setCookie", payload)
+        return True
+    except Exception as e:
+        logger.debug(f"CDP setCookie falhou para {cookie.get('name')}: {e}")
+        return False
+
+
+def _account_cookie_marker(account_name: str) -> Path:
+    storage = AccountStorage()
+    structure = storage.get_account_structure(account_name)
+    structure["cookies"].mkdir(parents=True, exist_ok=True)
+    return structure["cookies"] / "cookies_invalid.json"
+
+
+def mark_cookies_invalid(account_name: str, reason: str) -> None:
+    marker = _account_cookie_marker(account_name)
+    payload = {
+        "account": account_name,
+        "reason": reason,
+        "marked_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        logger.debug("Não foi possível gravar marker de cookies inválidos", exc_info=True)
+
+
+def clear_cookies_invalid_marker(account_name: str) -> None:
+    marker = _account_cookie_marker(account_name)
+    if marker.exists():
+        try:
+            marker.unlink()
+        except Exception:
+            logger.debug("Não foi possível remover marker de cookies inválidos", exc_info=True)
+
+
+def cookies_marked_invalid(account_name: str) -> bool:
+    marker = _account_cookie_marker(account_name)
+    return marker.exists()
+
+
+def _cookies_expired(cookies_list: List[Dict[str, Any]]) -> bool:
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    expiries = [int(cookie.get("expiry")) for cookie in cookies_list if cookie.get("expiry")]
+    if expiries and min(expiries) <= now_ts:
+        return True
+    return False
+
+
+def _is_logged_in(driver: WebDriver, timeout: int = 8) -> bool:
+    """Confere se a sessão está válida procurando elementos do estúdio do TikTok."""
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "[data-e2e='upload-icon']"))
+        )
+        return True
+    except Exception:
+        return False
+
+def load_cookies_for_account(
+    driver: WebDriver,
+    account_name: str,
+    base_url: str = "https://www.tiktok.com/"
+) -> bool:
+    from .account_storage import AccountStorage
+
+    base_url = (base_url or "").strip() or "https://www.tiktok.com/"
+    if not account_name or not account_name.strip():
+        logger.error("❌ ERRO: account_name é obrigatório")
+        print("❌ ERRO: account_name é obrigatório")
+        return False
+
+    logger.info(f"🔍 Tentando carregar cookies para conta: {account_name}")
+    print(f"🔍 Tentando carregar cookies para conta: {account_name}")
+
+    storage = AccountStorage()
+    auth_bundle = storage.get_latest_cookies(account_name)
+
+    if not auth_bundle:
+        logger.error(f"❌ Cookies não encontrados para conta: {account_name}")
+        print(f"❌ Cookies não encontrados para conta: {account_name}")
+        return False
+
+    local_storage_data: Dict[str, str] = {}
+    session_storage_data: Dict[str, str] = {}
+    cookies_payload: Any = auth_bundle
+
+    if isinstance(auth_bundle, dict):
+        local_storage_data = auth_bundle.get("local_storage") or {}
+        session_storage_data = auth_bundle.get("session_storage") or {}
+        cookies_payload = auth_bundle.get("cookies", auth_bundle)
+    elif isinstance(auth_bundle, list):
+        cookies_payload = auth_bundle
+    else:
+        cookies_payload = auth_bundle
+
+    # Tenta navegar para o TikTok
+    initial_timeout = False
+    try:
+        logger.info(f"🌐 Navegando para {base_url}...")
+        print(f"🌐 Navegando para {base_url}...")
+        driver.set_page_load_timeout(60)
+        driver.get(base_url)
+        logger.info(f"✅ Página carregada: {driver.current_url}")
+        print(f"✅ Página carregada: {driver.current_url}")
+
+        current_after_first_load = driver.current_url.lower()
+        already_logged = "login" not in current_after_first_load and "tiktok.com" in current_after_first_load
+
+        # Se já está logado, apenas reforça scripts anti-detecção e persiste cookies mais recentes
+        if already_logged:
+            logger.info(f"🔁 Sessão já ativa para '{account_name}', pulando reinjeção de cookies")
+            print(f"🔁 Sessão já ativa para '{account_name}', pulando reinjeção de cookies")
+            try:
+                driver.execute_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                )
+                driver.execute_script("window.navigator.chrome = {runtime: {}}")
+                driver.execute_script("delete navigator.__proto__.webdriver")
+            except Exception:
+                pass
+            save_cookies_for_account(driver, account_name)
+            return True
+
+        try:
+            driver.delete_all_cookies()
+        except Exception:
+            pass
+
+        if local_storage_data:
+            _apply_web_storage(driver, local_storage_data, "localStorage")
+        if session_storage_data:
+            _apply_web_storage(driver, session_storage_data, "sessionStorage")
+
+        # Executa scripts anti-detecção APÓS navegar para TikTok
+        logger.info("🛡️ Aplicando scripts anti-detecção...")
+        print("🛡️ Aplicando scripts anti-detecção...")
+        try:
+            driver.execute_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+            driver.execute_script("window.navigator.chrome = {runtime: {}}")
+            driver.execute_script("delete navigator.__proto__.webdriver")
+            logger.info("✅ Scripts anti-detecção aplicados")
+            print("✅ Scripts anti-detecção aplicados")
+        except Exception as e:
+            logger.warning(f"⚠️ Falha ao aplicar scripts anti-detecção: {e}")
+            print(f"⚠️ Falha ao aplicar scripts anti-detecção: {e}")
+            # Continua mesmo se falhar
+
+    except TimeoutException as e:
+        initial_timeout = True
+        logger.warning(f"⏱️ Timeout ao carregar {base_url} (prosseguindo mesmo assim): {e}")
+        print(f"⏱️ Timeout ao carregar {base_url} (prosseguindo mesmo assim): {e}")
+    except WebDriverException as e:
+        logger.error(f"❌ Erro WebDriver ao carregar página: {e}")
+        print(f"❌ Erro WebDriver ao carregar página: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Erro inesperado ao carregar página: {e}")
+        print(f"❌ Erro inesperado ao carregar página: {e}")
+        return False
+
+    if initial_timeout:
+        try:
+            driver.execute_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+            driver.execute_script("window.navigator.chrome = {runtime: {}}")
+            driver.execute_script("delete navigator.__proto__.webdriver")
+        except Exception as e:
+            logger.warning(f"⚠️ Falha ao aplicar scripts anti-detecção após timeout: {e}")
+            print(f"⚠️ Falha ao aplicar scripts anti-detecção após timeout: {e}")
+
+    # Parse cookies
+    cookies_list: List[Dict[str, Any]] = []
+    if isinstance(cookies_payload, dict) and "cookies" in cookies_payload:
+        cookies_list = _flatten_cookie_collection(cookies_payload["cookies"])
+    elif isinstance(cookies_payload, list):
+        cookies_list = _flatten_cookie_collection(cookies_payload)
+    elif isinstance(cookies_payload, dict):
+        cookies_list = [
+            {"name": name, "value": str(value), "domain": ".tiktok.com"}
+            for name, value in cookies_payload.items()
+        ]
+
+    if not cookies_list:
+        logger.error(f"❌ Formato de cookies inválido para: {account_name}")
+        print(f"❌ Formato de cookies inválido para: {account_name}")
+        return False
+
+    if _cookies_expired(cookies_list):
+        reason = "cookies expirados"
+        logger.error(f"❌ Cookies expirados para conta: {account_name}")
+        print(f"❌ Cookies expirados para conta: {account_name}")
+        mark_cookies_invalid(account_name, reason)
+        return False
+
+    # Adiciona cookies
+    logger.info(f"🍪 Adicionando {len(cookies_list)} cookies...")
+    print(f"🍪 Adicionando {len(cookies_list)} cookies...")
+    cookies_added = 0
+    cookies_failed = 0
+
+    for idx, original_cookie in enumerate(cookies_list, 1):
+        try:
+            normalised_cookie = _normalise_cookie_entry(original_cookie)
+            if not normalised_cookie:
+                continue
+
+            selenium_cookie = dict(normalised_cookie)
+            selenium_cookie.pop("sameSite", None)
+            selenium_cookie.pop("expiry", None)
+
+            try:
+                driver.add_cookie(selenium_cookie)
+                added = True
+            except WebDriverException as e:
+                logger.warning(
+                    f"⚠️ Erro ao adicionar cookie #{idx} '{selenium_cookie.get('name', 'unknown')}': {e}"
+                )
+                print(
+                    f"⚠️ Erro ao adicionar cookie #{idx} '{selenium_cookie.get('name', 'unknown')}': {e}"
+                )
+                added = _set_cookie_via_cdp(driver, normalised_cookie, base_url)
+
+            if added:
+                cookies_added += 1
+                if idx % 10 == 0:
+                    logger.info(f"  ✓ {idx}/{len(cookies_list)} cookies adicionados...")
+                    print(f"  ✓ {idx}/{len(cookies_list)} cookies adicionados...")
+            else:
+                cookies_failed += 1
+                logger.warning(
+                    f"⚠️ Cookie #{idx} '{selenium_cookie.get('name', 'unknown')}' não pôde ser aplicado"
+                )
+                print(
+                    f"⚠️ Cookie #{idx} '{selenium_cookie.get('name', 'unknown')}' não pôde ser aplicado"
+                )
+        except Exception as e:
+            cookies_failed += 1
+            logger.warning(f"⚠️ Erro inesperado ao preparar cookie #{idx}: {e}")
+            print(f"⚠️ Erro inesperado ao preparar cookie #{idx}: {e}")
+
+    logger.info(f"🍪 Cookies: {cookies_added} adicionados, {cookies_failed} falharam")
+    print(f"🍪 Cookies: {cookies_added} adicionados, {cookies_failed} falharam")
+
+    logger.info("🔄 Recarregando página com cookies aplicados...")
+    print("🔄 Recarregando página com cookies aplicados...")
+    reload_timeout = False
+    try:
+        if initial_timeout:
+            driver.get(base_url)
+        else:
+            driver.refresh()
+
+        WebDriverWait(driver, 12).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+        time.sleep(2)
+        logger.info(f"✅ Página carregada com cookies: {driver.current_url}")
+        print(f"✅ Página carregada com cookies: {driver.current_url}")
+    except TimeoutException as e:
+        reload_timeout = True
+        logger.warning(f"⏱️ Timeout ao recarregar com cookies (prosseguindo com validação): {e}")
+        print(f"⏱️ Timeout ao recarregar com cookies (prosseguindo com validação): {e}")
+    except WebDriverException as e:
+        logger.error(f"❌ Erro ao recarregar com cookies: {e}")
+        print(f"❌ Erro ao recarregar com cookies: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Erro inesperado ao recarregar com cookies: {e}")
+        print(f"❌ Erro inesperado ao recarregar com cookies: {e}")
+        return False
+
+    is_logged_in = _is_logged_in(driver)
+    if not is_logged_in:
+        try:
+            driver.get("https://www.tiktok.com/upload")
+            time.sleep(2)
+            is_logged_in = _is_logged_in(driver, timeout=6)
+        except Exception:
+            pass
+
+    if is_logged_in:
+        logger.info(f"✅ Login bem-sucedido para conta: {account_name}")
+        print(f"✅ Login bem-sucedido para conta: {account_name}")
+        try:
+            save_cookies_for_account(driver, account_name)
+            clear_cookies_invalid_marker(account_name)
+        except Exception as e:
+            logger.warning(f"⚠️ Falha ao persistir cookies atualizados para '{account_name}': {e}")
+    else:
+        reason = "timeout parcial" if (initial_timeout or reload_timeout) else "redirecionado para login"
+        current_url = driver.current_url.lower()
+        logger.error(f"❌ Falha no login para conta: {account_name} (URL atual: {current_url}) [{reason}]")
+        print(f"❌ Falha no login para conta: {account_name} (URL atual: {current_url}) [{reason}]")
+        mark_cookies_invalid(account_name, reason)
+
+    return is_logged_in
+
+
+def save_cookies_for_account(driver: WebDriver, account_name: str) -> Optional[Path]:
+    from .account_storage import AccountStorage
+
+    if not account_name or not account_name.strip():
+        print("❌ ERRO: account_name é obrigatório")
+        return None
+
+    try:
+        cookies = driver.get_cookies()
+        local_storage = _dump_web_storage(driver, "localStorage")
+        session_storage = _dump_web_storage(driver, "sessionStorage")
+
+        payload: Dict[str, Any] = {
+            "cookies": cookies,
+        }
+        if local_storage:
+            payload["local_storage"] = local_storage
+        if session_storage:
+            payload["session_storage"] = session_storage
+
+        storage = AccountStorage()
+        cookies_path = storage.save_cookies(account_name, payload)
+        print(f"✅ Cookies salvos para conta '{account_name}': {cookies_path}")
+        return cookies_path
+    except Exception as e:
+        print(f"❌ Erro ao salvar cookies para '{account_name}': {e}")
+        return None
