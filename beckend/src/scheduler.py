@@ -822,46 +822,8 @@ class TikTokScheduler:
             for i, dv in enumerate(to_post, 1):
                 self.log(f"\n📤 Postando vídeo {i} de {len(to_post)} :: {Path(dv.path).name}")
 
-                # PROTEÇÃO ANTI-DUPLICAÇÃO TRIPLA (previne race conditions)
-                p = Path(dv.path)
-                unified_path = p.with_suffix(".json")
-                posting_lock_file = p.with_suffix(".posting.lock")
-
-                # 1. Verificação: arquivo de lock existe? (outra thread está postando)
-                if posting_lock_file.exists():
-                    lock_age = time.time() - posting_lock_file.stat().st_mtime
-                    if lock_age < 600:  # Lock válido por 10 minutos
-                        self.log(f"⚠️ Vídeo sendo postado por outro processo (lock ativo), pulando: {p.name}")
-                        continue
-                    else:
-                        # Lock antigo (travou), remove
-                        self.log(f"🔓 Removendo lock antigo ({lock_age:.0f}s): {p.name}")
-                        try:
-                            posting_lock_file.unlink()
-                        except:
-                            pass
-
-                # 2. Verificação: vídeo já foi postado?
-                if unified_path.exists():
-                    meta = _read_json(unified_path)
-                    if meta and (meta.get("status") == "posted" or meta.get("posted_at")):
-                        self.log(f"⚠️ Vídeo já postado (detectado em verificação dupla), pulando: {p.name}")
-                        # Remove lock se existir
-                        try:
-                            posting_lock_file.unlink(missing_ok=True)
-                        except:
-                            pass
-                        continue
-
-                # 3. MARCA vídeo como "being posted" ANTES de iniciar (lock atômico)
-                try:
-                    posting_lock_file.write_text(f"posting_started_at={_now_app().isoformat()}", encoding="utf-8")
-                    self.log(f"🔒 Lock de postagem criado: {posting_lock_file.name}")
-                except Exception as e:
-                    self.log(f"⚠️ Falha ao criar lock (outro processo pode ter criado primeiro), pulando: {e}")
-                    continue
-
-                # 4. Tenta postar
+                # Proteção contra duplicatas DELEGADA para uploader_modular (DuplicateProtectionModule)
+                # O uploader_modular gerencia TUDO: verificações, locks, finalização
                 try:
                     ok = self._post_one(dv.path)
                 except TRANSIENT_DRIVER_ERRORS as e:
@@ -869,18 +831,11 @@ class TikTokScheduler:
                     self.close_driver()
                     ok = self._ensure_logged() and self._post_one(dv.path)
 
-                # 5. Finaliza e remove lock
+                # Finaliza se sucesso (move para posted/)
                 if ok:
                     self._finalize_success(dv.path)
                 else:
                     self.log("❌ Postagem não confirmada; manteremos o arquivo em /videos")
-
-                # Remove lock após tentativa (sucesso ou falha)
-                try:
-                    posting_lock_file.unlink(missing_ok=True)
-                    self.log(f"🔓 Lock de postagem removido")
-                except:
-                    pass
 
             self.log("✅ Tick concluído\n")
         finally:
