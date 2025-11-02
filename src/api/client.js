@@ -2,7 +2,7 @@ import axios from 'axios';
 
 const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8082/',
-  timeout: 300000, // 5 minutos para uploads de vídeo
+  timeout: 900000, // 15 minutos para uploads de vídeo grandes (alinhado com Nginx)
   headers: {
     'Content-Type': 'application/json',
   },

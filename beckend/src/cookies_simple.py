@@ -114,32 +114,47 @@ def load_cookies_for_account(
         logger.warning(f"⚠️ Erro ao recarregar: {e}")
         print(f"⚠️ Erro ao recarregar: {e}")
 
-    # 7. Verifica se está logado (procura ícone de upload)
+    # 7. Verifica se está logado (procura página de upload)
     logger.info("✅ Verificando login...")
     print("✅ Verificando login...")
 
-    try:
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "[data-e2e='upload-icon']"))
-        )
-        logger.info(f"✅ Login bem-sucedido: {account_name}")
-        print(f"✅ Login bem-sucedido: {account_name}")
-        return True
-    except:
-        # Tenta ir direto para /upload
+    # Lista de URLs para testar
+    upload_urls = [
+        "https://www.tiktok.com/tiktokstudio/upload?from=creator_center",
+        "https://www.tiktok.com/upload"
+    ]
+
+    for upload_url in upload_urls:
         try:
-            driver.get("https://www.tiktok.com/upload")
-            time.sleep(2)
-            WebDriverWait(driver, 8).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "[data-e2e='upload-icon']"))
-            )
-            logger.info(f"✅ Login bem-sucedido (via /upload): {account_name}")
-            print(f"✅ Login bem-sucedido (via /upload): {account_name}")
-            return True
-        except:
-            logger.error(f"❌ Login falhou: {account_name}")
-            print(f"❌ Login falhou: {account_name}")
-            return False
+            logger.info(f"🌐 Testando: {upload_url}")
+            driver.get(upload_url)
+            time.sleep(3)
+
+            # Verifica se NÃO foi redirecionado para login
+            if "login" in driver.current_url.lower():
+                logger.warning(f"⚠️ Redirecionado para login em {upload_url}")
+                continue
+
+            # Procura campo de upload de arquivo (sinal de login bem-sucedido)
+            try:
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='file']"))
+                )
+                logger.info(f"✅ Login bem-sucedido: {account_name} (via {upload_url})")
+                print(f"✅ Login bem-sucedido: {account_name}")
+                return True
+            except:
+                logger.warning(f"⚠️ Campo de upload não encontrado em {upload_url}")
+                continue
+
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao testar {upload_url}: {e}")
+            continue
+
+    # Se chegou aqui, todas as tentativas falharam
+    logger.error(f"❌ Login falhou: {account_name}")
+    print(f"❌ Login falhou: {account_name}")
+    return False
 
 
 def save_cookies_for_account(driver: WebDriver, account_name: str) -> bool:
