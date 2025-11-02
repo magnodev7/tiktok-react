@@ -90,20 +90,47 @@ class TikTokUploader:
                 self.log(f"🌐 Acessando: {url}")
                 self.driver.set_page_load_timeout(30)
                 self.driver.get(url)
-                time.sleep(3)
+                time.sleep(5)  # Aumentado de 3s para 5s
+
+                current_url = self.driver.current_url
+                self.log(f"🔍 URL atual: {current_url}")
 
                 # Verifica se não foi redirecionado para login
-                if "login" in self.driver.current_url.lower():
+                if "login" in current_url.lower():
                     self.log("⚠️ Redirecionado para login")
                     continue
 
-                # Procura input de arquivo
-                try:
-                    self._wait_element(By.CSS_SELECTOR, "input[type='file']", timeout=10)
-                    self.log("✅ Página de upload carregada")
-                    return True
-                except TimeoutException:
-                    self.log("⚠️ Input de arquivo não encontrado")
+                # Procura input de arquivo (múltiplos seletores)
+                file_input_selectors = [
+                    "input[type='file']",
+                    "input[accept*='video']",
+                    "input[name='file']",
+                    "[data-e2e='upload-input']"
+                ]
+
+                found = False
+                for selector in file_input_selectors:
+                    try:
+                        element = self._wait_element(By.CSS_SELECTOR, selector, timeout=5)
+                        self.log(f"✅ Campo de upload encontrado com seletor: {selector}")
+                        return True
+                    except TimeoutException:
+                        continue
+
+                if not found:
+                    # DEBUG: Salva screenshot e HTML
+                    try:
+                        screenshot_path = f"/tmp/tiktok_upload_page_{int(time.time())}.png"
+                        self.driver.save_screenshot(screenshot_path)
+                        self.log(f"📸 Screenshot salvo: {screenshot_path}")
+
+                        # Log do título da página
+                        page_title = self.driver.title
+                        self.log(f"📄 Título da página: {page_title}")
+                    except Exception as e:
+                        self.log(f"⚠️ Erro ao salvar debug: {e}")
+
+                    self.log("⚠️ Input de arquivo não encontrado com nenhum seletor")
                     continue
 
             except Exception as e:

@@ -46,14 +46,21 @@ def _build_chrome_options(headless: bool = True) -> Options:
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-blink-features=AutomationControlled")
 
+    # Opções adicionais anti-detecção
+    opts.add_argument("--disable-web-security")
+    opts.add_argument("--disable-features=IsolateOrigins,site-per-process")
+    opts.add_argument("--disable-site-isolation-trials")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--start-maximized")
+
     # Headless moderno
     if headless:
         opts.add_argument("--headless=new")
 
-    # User-Agent realista
+    # User-Agent realista (atualizado para Chrome 141)
     opts.add_argument(
         "user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
     )
 
     # Preferências básicas
