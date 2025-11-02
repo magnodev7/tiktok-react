@@ -274,7 +274,7 @@ class TikTokUploader:
 
     def click_publish(self) -> bool:
         """
-        Clica no botão de publicar (SIMPLES).
+        Clica no botão de publicar com seletores ROBUSTOS (contra mudanças do TikTok).
 
         Returns:
             True se clicou, False caso contrário
@@ -286,17 +286,38 @@ class TikTokUploader:
         except:
             pass
 
-        # Seletores do botão (ordem de prioridade)
+        # SELETORES EXPANDIDOS (ordem de prioridade - do mais específico ao mais genérico)
         publish_selectors = [
+            # Seletores data-e2e (mais confiáveis)
             "//button[@data-e2e='post_video_button' and not(@disabled)]",
             "//button[@data-e2e='post_button' and not(@disabled)]",
-            "//button[contains(normalize-space(.), 'Post') and not(@disabled)]",
-            "//button[contains(normalize-space(.), 'Publicar') and not(@disabled)]",
+            "//button[@data-e2e='publish-button' and not(@disabled)]",
+            "//button[@data-e2e='submit-button' and not(@disabled)]",
+
+            # Seletores por texto (vários idiomas)
+            "//button[contains(translate(normalize-space(.), 'POST', 'post'), 'post') and not(@disabled)]",
+            "//button[contains(translate(normalize-space(.), 'PUBLICAR', 'publicar'), 'publicar') and not(@disabled)]",
+            "//button[contains(translate(normalize-space(.), 'PUBLISH', 'publish'), 'publish') and not(@disabled)]",
+            "//button[contains(translate(normalize-space(.), 'SUBMIT', 'submit'), 'submit') and not(@disabled)]",
+            "//button[contains(translate(normalize-space(.), 'ENVIAR', 'enviar'), 'enviar') and not(@disabled)]",
+
+            # Seletores genéricos por classe/tipo (último recurso)
+            "//button[contains(@class, 'post') and not(@disabled)]",
+            "//button[contains(@class, 'submit') and not(@disabled)]",
+            "//button[contains(@class, 'publish') and not(@disabled)]",
+            "//button[@type='submit' and not(@disabled)]",
+
+            # Seletores por hierarquia (último recurso - procura botões principais)
+            "//div[contains(@class, 'publish')]//button[not(@disabled)]",
+            "//div[contains(@class, 'submit')]//button[not(@disabled)]",
+            "//form//button[@type='submit' and not(@disabled)]",
         ]
 
-        for selector in publish_selectors:
+        self.log(f"🔍 Procurando botão de publicar ({len(publish_selectors)} seletores)...")
+
+        for idx, selector in enumerate(publish_selectors, 1):
             try:
-                btn = self._wait_clickable(By.XPATH, selector, timeout=5)
+                btn = self._wait_clickable(By.XPATH, selector, timeout=3)
 
                 # Rola até o botão
                 self.driver.execute_script(
@@ -304,15 +325,18 @@ class TikTokUploader:
                 )
                 time.sleep(0.5)
 
-                # Tenta clicar
+                # Tenta clicar (método normal primeiro)
                 try:
                     btn.click()
+                    self.log(f"🚀 Botão de publicar clicado (seletor #{idx})")
+                    time.sleep(3)
+                    return True
                 except:
+                    # Fallback: JS click
                     self.driver.execute_script("arguments[0].click();", btn)
-
-                self.log("🚀 Botão de publicar clicado")
-                time.sleep(3)
-                return True
+                    self.log(f"🚀 Botão de publicar clicado via JS (seletor #{idx})")
+                    time.sleep(3)
+                    return True
 
             except TimeoutException:
                 continue
@@ -320,13 +344,23 @@ class TikTokUploader:
                 # Tenta JS click se normal falhar
                 try:
                     self.driver.execute_script("arguments[0].click();", btn)
-                    self.log("🚀 Botão de publicar clicado (via JS)")
+                    self.log(f"🚀 Botão de publicar clicado via JS (seletor #{idx})")
                     time.sleep(3)
                     return True
                 except:
                     continue
+            except Exception as e:
+                self.log(f"⚠️ Erro ao tentar seletor #{idx}: {e}")
+                continue
 
-        self.log("❌ Botão de publicar não encontrado")
+        self.log("❌ Botão de publicar não encontrado em nenhum dos seletores")
+        # Debug: salva screenshot para análise
+        try:
+            screenshot_path = f"/tmp/tiktok_publish_button_not_found_{int(time.time())}.png"
+            self.driver.save_screenshot(screenshot_path)
+            self.log(f"📸 Screenshot salvo: {screenshot_path}")
+        except:
+            pass
         return False
 
     def handle_confirmation_dialog(self) -> bool:

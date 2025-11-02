@@ -388,9 +388,22 @@ class TikTokScheduler:
         from .driver import get_fresh_driver, is_session_alive
         from .cookies import cookies_marked_invalid
 
-        attempt_limit = max(1, getattr(self, "max_session_attempts", 20))
-        retry_delay = max(0.0, getattr(self, "session_retry_delay", 5.0))
+        # CORREÇÃO: Reduz tentativas de 20 para 3 (evita loops infinitos)
+        # Se cookies estão inválidos, não adianta tentar 20x
+        attempt_limit = max(1, min(getattr(self, "max_session_attempts", 3), 3))
+        retry_delay = max(1.0, getattr(self, "session_retry_delay", 5.0))
         last_error = None
+        last_failure_time = getattr(self, "_last_cookie_failure_time", None)
+
+        # PROTEÇÃO: Se falhou recentemente (< 5 min), não tenta novamente
+        if last_failure_time:
+            time_since_failure = (_now_app() - last_failure_time).total_seconds()
+            cooldown_seconds = 300  # 5 minutos
+            if time_since_failure < cooldown_seconds:
+                remaining = int(cooldown_seconds - time_since_failure)
+                self.log(f"⏸️ Cookies falharam recentemente. Aguardando {remaining}s antes de tentar novamente.")
+                self.log(f"💡 Para forçar nova tentativa, atualize os cookies da conta '{self.account}' no painel.")
+                return False
 
         if cookies_marked_invalid(self.account):
             self.log("❌ Cookies marcados como inválidos. Atualize-os via painel antes de novas tentativas.")
@@ -410,6 +423,8 @@ class TikTokScheduler:
                         current_url = ""
                     if "login" not in current_url and "tiktok.com" in current_url:
                         self.log("🔄 Reutilizando sessão Chrome já autenticada")
+                        # Limpa timestamp de falha (sessão OK)
+                        self._last_cookie_failure_time = None
                         return True
 
                 if existing and not is_session_alive(existing):
@@ -426,10 +441,14 @@ class TikTokScheduler:
                     if attempt > 1:
                         self.log(f"🟢 Sessão restabelecida após {attempt} tentativas")
                     self.log(f"✅ Login via cookies OK para: {self.account}")
+                    # Limpa timestamp de falha (sucesso!)
+                    self._last_cookie_failure_time = None
                     return True
                 last_error = "cookies inválidos"
                 self.log(f"❌ Falha no login com cookies (tentativa {attempt}/{attempt_limit})")
-                # Não faz sentido tentar novamente com os mesmos cookies
+                # CORREÇÃO: Marca timestamp de falha e para tentativas
+                # Não faz sentido tentar 20x com os mesmos cookies inválidos
+                self._last_cookie_failure_time = _now_app()
                 break
             except TRANSIENT_DRIVER_ERRORS as e:
                 last_error = e
@@ -446,6 +465,9 @@ class TikTokScheduler:
                 self.kill_chrome_processes()
                 self.log(f"🔁 Recriando driver em {retry_delay:.1f}s…")
                 time.sleep(retry_delay)
+
+        # Marca timestamp de falha
+        self._last_cookie_failure_time = _now_app()
 
         if last_error:
             self.log(f"❌ Não foi possível restabelecer sessão após {attempt_limit} tentativas. Último erro: {last_error}")
@@ -795,15 +817,46 @@ class TikTokScheduler:
             for i, dv in enumerate(to_post, 1):
                 self.log(f"\n📤 Postando vídeo {i} de {len(to_post)} :: {Path(dv.path).name}")
 
-                # Verificação dupla: confirma que o vídeo ainda não foi postado (previne duplicatas)
+                # PROTEÇÃO ANTI-DUPLICAÇÃO TRIPLA (previne race conditions)
                 p = Path(dv.path)
                 unified_path = p.with_suffix(".json")
+                posting_lock_file = p.with_suffix(".posting.lock")
+
+                # 1. Verificação: arquivo de lock existe? (outra thread está postando)
+                if posting_lock_file.exists():
+                    lock_age = time.time() - posting_lock_file.stat().st_mtime
+                    if lock_age < 600:  # Lock válido por 10 minutos
+                        self.log(f"⚠️ Vídeo sendo postado por outro processo (lock ativo), pulando: {p.name}")
+                        continue
+                    else:
+                        # Lock antigo (travou), remove
+                        self.log(f"🔓 Removendo lock antigo ({lock_age:.0f}s): {p.name}")
+                        try:
+                            posting_lock_file.unlink()
+                        except:
+                            pass
+
+                # 2. Verificação: vídeo já foi postado?
                 if unified_path.exists():
                     meta = _read_json(unified_path)
                     if meta and (meta.get("status") == "posted" or meta.get("posted_at")):
                         self.log(f"⚠️ Vídeo já postado (detectado em verificação dupla), pulando: {p.name}")
+                        # Remove lock se existir
+                        try:
+                            posting_lock_file.unlink(missing_ok=True)
+                        except:
+                            pass
                         continue
 
+                # 3. MARCA vídeo como "being posted" ANTES de iniciar (lock atômico)
+                try:
+                    posting_lock_file.write_text(f"posting_started_at={_now_app().isoformat()}", encoding="utf-8")
+                    self.log(f"🔒 Lock de postagem criado: {posting_lock_file.name}")
+                except Exception as e:
+                    self.log(f"⚠️ Falha ao criar lock (outro processo pode ter criado primeiro), pulando: {e}")
+                    continue
+
+                # 4. Tenta postar
                 try:
                     ok = self._post_one(dv.path)
                 except TRANSIENT_DRIVER_ERRORS as e:
@@ -811,10 +864,18 @@ class TikTokScheduler:
                     self.close_driver()
                     ok = self._ensure_logged() and self._post_one(dv.path)
 
+                # 5. Finaliza e remove lock
                 if ok:
                     self._finalize_success(dv.path)
                 else:
                     self.log("❌ Postagem não confirmada; manteremos o arquivo em /videos")
+
+                # Remove lock após tentativa (sucesso ou falha)
+                try:
+                    posting_lock_file.unlink(missing_ok=True)
+                    self.log(f"🔓 Lock de postagem removido")
+                except:
+                    pass
 
             self.log("✅ Tick concluído\n")
         finally:
@@ -832,16 +893,21 @@ class TikTokScheduler:
         # Usa scheduler ISOLADO desta conta (self.schedule) ao invés do global
         self.schedule.clear()
         schedules = _read_schedules()
-        for t in sorted(set(schedules)):
-            self.schedule.every().day.at(t).do(self.scheduled_posting)
-            self.log(f"⏰ Tick diário registrado às {t}")
-        # Tick de minuto permanece como fallback para garantir execução
-        self.schedule.every(1).minutes.do(self.scheduled_posting)
-        self.log("⏱️ Tick de 1 em 1 minuto registrado (fallback).")
-        # também roda com alta frequência para catch-up de atrasados
-        fast_seconds = max(5, FAST_CATCHUP_SECONDS)
-        self.schedule.every(fast_seconds).seconds.do(self.scheduled_posting)
-        self.log(f"⏱️ Tick de catch-up registrado a cada {fast_seconds}s.")
+
+        # CORREÇÃO: Usa APENAS 1 scheduler para evitar postagens duplicadas
+        # Sistema anterior tinha 3 schedulers simultâneos causando race conditions:
+        # - every().day.at(t) - tick diário
+        # - every(1).minutes - tick de minuto
+        # - every(fast_seconds).seconds - tick de catch-up
+        #
+        # SOLUÇÃO: Mantém apenas o tick de catch-up (mais confiável e rápido)
+        # Verifica a cada 30 segundos se há vídeos para postar
+        check_interval = max(10, int(os.getenv("TIKTOK_CHECK_INTERVAL_SECONDS", "30")))
+        self.schedule.every(check_interval).seconds.do(self.scheduled_posting)
+        self.log(f"⏰ Scheduler configurado: verificação a cada {check_interval}s")
+
+        # Log dos horários de agendamento (apenas informativo)
+        self.log(f"📅 Horários de postagem configurados: {', '.join(sorted(set(schedules)))}")
 
     def run_loop(self):
         self.log("🔁 Loop do agendador iniciado")
