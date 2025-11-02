@@ -18,6 +18,7 @@ from modules.audience_selector import AudienceModule, AudienceType
 from modules.post_action import PostActionModule
 from modules.post_confirmation import PostConfirmationModule
 from modules.file_manager import FileManagerModule
+from modules.duplicate_protection import DuplicateProtectionModule
 
 
 class TikTokUploader:
@@ -32,6 +33,7 @@ class TikTokUploader:
     4. PostActionModule - Ação de postagem
     5. PostConfirmationModule - Confirmação de postagem
     6. FileManagerModule - Gerenciamento de arquivos
+    7. DuplicateProtectionModule - Proteção contra duplicatas
     """
 
     def __init__(
@@ -67,6 +69,7 @@ class TikTokUploader:
         self.post_action_module = PostActionModule(driver, logger=self.log)
         self.confirmation_module = PostConfirmationModule(driver, logger=self.log)
         self.file_manager = FileManagerModule(logger=self.log)
+        self.duplicate_protection = DuplicateProtectionModule(logger=self.log)
 
         # Compatibilidade com código antigo
         self._file_input_context = None
@@ -151,72 +154,109 @@ class TikTokUploader:
 
     # ===================== MÉTODO PRINCIPAL =====================
 
-    def post_video(self, video_path: str, description: str = "") -> bool:
+    def post_video(self, video_path: str, description: str = "", posted_dir: Optional[str] = None) -> bool:
         """
-        Publica vídeo completo (fluxo modular).
+        Publica vídeo completo (fluxo modular com proteção contra duplicatas).
 
         Args:
             video_path: Caminho do vídeo
             description: Descrição do vídeo
+            posted_dir: Diretório posted (para verificação de duplicatas)
 
         Returns:
             True se publicou, False caso contrário
         """
         self.log(f"📹 Iniciando publicação: {os.path.basename(video_path)}")
 
-        # MÓDULO 1: Upload e Validação
-        self.log("🔹 Etapa 1/6: Upload do vídeo")
-        if not self.go_to_upload():
-            self.log("❌ Falha ao acessar página de upload")
+        # MÓDULO 0: Proteção contra Duplicatas (VERIFICAÇÃO PRÉVIA)
+        self.log("🔹 Etapa 0/7: Verificação de duplicatas")
+        can_post, reason = self.duplicate_protection.can_post_video(video_path, posted_dir)
+        if not can_post:
+            self.log(f"❌ Vídeo bloqueado: {reason}")
             return False
 
-        if not self.send_file(video_path):
-            self.log("🔁 Tentando enviar novamente...")
-            if not self.send_file(video_path):
-                self.log("❌ Falha no upload após retry")
+        # MÓDULO 0.5: Cria lock de postagem (PROTEÇÃO ATÔMICA)
+        if not self.duplicate_protection.create_posting_lock(video_path):
+            self.log("❌ Falha ao criar lock (race condition detectada)")
+            return False
+
+        try:
+            # MÓDULO 1: Upload e Validação
+            self.log("🔹 Etapa 1/7: Upload do vídeo")
+            if not self.go_to_upload():
+                self.log("❌ Falha ao acessar página de upload")
+                self.duplicate_protection.remove_posting_lock(video_path)
                 return False
 
-        # MÓDULO 2: Tratamento da Descrição
-        self.log("🔹 Etapa 2/6: Preenchimento da descrição")
-        if description:
-            self.fill_description(description)
-        else:
-            self.log("ℹ️ Sem descrição fornecida")
+            if not self.send_file(video_path):
+                self.log("🔁 Tentando enviar novamente...")
+                if not self.send_file(video_path):
+                    self.log("❌ Falha no upload após retry")
+                    self.duplicate_protection.remove_posting_lock(video_path)
+                    return False
 
-        # MÓDULO 3: Seleção de Audiência
-        self.log("🔹 Etapa 3/6: Configuração de audiência")
-        self.set_audience_public()
+            # MÓDULO 2: Tratamento da Descrição
+            self.log("🔹 Etapa 2/7: Preenchimento da descrição")
+            if description:
+                self.fill_description(description)
+            else:
+                self.log("ℹ️ Sem descrição fornecida")
 
-        # MÓDULO 4: Ação de Postagem
-        self.log("🔹 Etapa 4/6: Publicação")
-        if not self.click_publish():
-            self.log("❌ Falha ao clicar em publicar")
-            return False
+            # MÓDULO 3: Seleção de Audiência
+            self.log("🔹 Etapa 3/7: Configuração de audiência")
+            self.set_audience_public()
 
-        # MÓDULO 4.5: Gerenciamento de Modais
-        self.log("🔹 Etapa 4.5/6: Gerenciamento de modais")
-        self.handle_confirmation_dialog()
+            # MÓDULO 4: Ação de Postagem
+            self.log("🔹 Etapa 4/7: Publicação")
+            if not self.click_publish():
+                self.log("❌ Falha ao clicar em publicar")
+                self.duplicate_protection.remove_posting_lock(video_path)
+                return False
 
-        # MÓDULO 4.6: Detecção de Violações
-        self.log("🔹 Etapa 4.6/6: Verificação de violações")
-        if self.post_action_module.detect_content_violation():
-            self.log("❌ Vídeo rejeitado por violação de conteúdo")
-            return False
+            # MÓDULO 4.5: Gerenciamento de Modais
+            self.log("🔹 Etapa 4.5/7: Gerenciamento de modais")
+            self.handle_confirmation_dialog()
 
-        # MÓDULO 4.7: Retry se modal "exit" foi fechado
-        if self.post_action_module.is_on_upload_page():
-            self.log("🔁 Ainda na página de upload, tentando publicar novamente...")
-            if self.click_publish():
-                self.log("✅ Segundo clique em publicar executado")
-                self.handle_confirmation_dialog()
+            # MÓDULO 4.6: Detecção de Violações
+            self.log("🔹 Etapa 4.6/7: Verificação de violações")
+            if self.post_action_module.detect_content_violation():
+                self.log("❌ Vídeo rejeitado por violação de conteúdo")
+                self.duplicate_protection.remove_posting_lock(video_path)
+                return False
 
-        # MÓDULO 5: Confirmação de Postagem
-        self.log("🔹 Etapa 5/6: Confirmação de postagem")
-        if self.confirm_posted():
-            self.log("🎉 Vídeo publicado com sucesso!")
-            return True
-        else:
-            self.log("⚠️ Publicação não confirmada (pode ter sido publicado)")
+            # MÓDULO 4.7: Retry se modal "exit" foi fechado
+            if self.post_action_module.is_on_upload_page():
+                self.log("🔁 Ainda na página de upload, tentando publicar novamente...")
+                if self.click_publish():
+                    self.log("✅ Segundo clique em publicar executado")
+                    self.handle_confirmation_dialog()
+
+            # MÓDULO 5: Confirmação de Postagem
+            self.log("🔹 Etapa 5/7: Confirmação de postagem")
+            if self.confirm_posted():
+                self.log("🎉 Vídeo publicado com sucesso!")
+
+                # MÓDULO 6: Marca como postado e remove lock
+                self.log("🔹 Etapa 6/7: Finalização")
+                self.duplicate_protection.finalize_post_operation(
+                    video_path=video_path,
+                    success=True,
+                    mark_as_posted=True,
+                    remove_lock=True
+                )
+                return True
+            else:
+                self.log("⚠️ Publicação não confirmada (pode ter sido publicado)")
+
+                # Remove lock mesmo sem confirmar
+                self.duplicate_protection.remove_posting_lock(video_path)
+                return False
+
+        except Exception as e:
+            self.log(f"❌ Erro durante postagem: {e}")
+
+            # Remove lock em caso de erro
+            self.duplicate_protection.remove_posting_lock(video_path)
             return False
 
     # ===================== MÉTODOS AUXILIARES PÚBLICOS =====================

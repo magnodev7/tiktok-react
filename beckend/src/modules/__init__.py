@@ -9,6 +9,7 @@ from .audience_selector import AudienceModule
 from .post_action import PostActionModule
 from .post_confirmation import PostConfirmationModule
 from .file_manager import FileManagerModule
+from .duplicate_protection import DuplicateProtectionModule
 
 __all__ = [
     "VideoUploadModule",
@@ -17,4 +18,5 @@ __all__ = [
     "PostActionModule",
     "PostConfirmationModule",
     "FileManagerModule",
+    "DuplicateProtectionModule",
 ]
