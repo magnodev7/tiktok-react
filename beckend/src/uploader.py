@@ -437,7 +437,20 @@ class TikTokUploader:
             True se lidou ou não apareceu, False se falhou
         """
         try:
-            # PRIMEIRO: Fecha modais TUX que podem estar bloqueando
+            # PRIMEIRO: Verifica e fecha modal "Are you sure you want to exit?"
+            try:
+                exit_modal_btn = self.driver.find_element(
+                    By.XPATH,
+                    "//button[contains(translate(., 'CANCEL', 'cancel'), 'cancel')]"
+                )
+                if exit_modal_btn.is_displayed():
+                    exit_modal_btn.click()
+                    self.log("🚪 Modal 'exit' fechado - clicado em Cancel")
+                    time.sleep(2)
+            except:
+                pass
+
+            # SEGUNDO: Fecha modais TUX que podem estar bloqueando
             try:
                 # Procura botões de fechar em modais TUX
                 close_selectors = [
@@ -459,7 +472,7 @@ class TikTokUploader:
             except:
                 pass
 
-            # SEGUNDO: Espera modal de confirmação aparecer (ou não)
+            # TERCEIRO: Espera modal de confirmação aparecer (ou não)
             WebDriverWait(self.driver, 5).until(
                 EC.presence_of_element_located(
                     (By.XPATH, "//button[contains(., 'Post') or contains(., 'Continue')]")
@@ -598,8 +611,21 @@ class TikTokUploader:
         if not self.click_publish():
             return False
 
-        # 6. Lida com modal de confirmação
+        # 6. Lida com modal de confirmação (pode ter modal "exit" primeiro)
         self.handle_confirmation_dialog()
+
+        # 6.5. Se modal "exit" foi fechado, tenta clicar em Post novamente
+        try:
+            # Verifica se ainda está na página de upload (não publicou)
+            if "upload" in self.driver.current_url.lower():
+                self.log("🔁 Ainda na página de upload, tentando publicar novamente...")
+                if self.click_publish():
+                    self.log("✅ Segundo clique em publicar executado")
+                    time.sleep(2)
+                    # Tenta lidar com modal de confirmação de novo
+                    self.handle_confirmation_dialog()
+        except:
+            pass
 
         # 7. Confirma publicação
         if self.confirm_posted():
