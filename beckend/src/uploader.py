@@ -437,29 +437,72 @@ class TikTokUploader:
             True se lidou ou não apareceu, False se falhou
         """
         try:
-            # Espera modal aparecer (ou não)
+            # PRIMEIRO: Fecha modais TUX que podem estar bloqueando
+            try:
+                # Procura botões de fechar em modais TUX
+                close_selectors = [
+                    "//div[@class='TUXModal-overlay']//button[contains(@aria-label, 'Close')]",
+                    "//div[@class='TUXModal-overlay']//button[contains(@class, 'close')]",
+                    "//div[contains(@class, 'Modal')]//button[@aria-label='Close']",
+                ]
+
+                for selector in close_selectors:
+                    try:
+                        close_btn = self.driver.find_element(By.XPATH, selector)
+                        if close_btn.is_displayed():
+                            close_btn.click()
+                            self.log("🚪 Modal TUX fechado")
+                            time.sleep(1)
+                            break
+                    except:
+                        continue
+            except:
+                pass
+
+            # SEGUNDO: Espera modal de confirmação aparecer (ou não)
             WebDriverWait(self.driver, 5).until(
                 EC.presence_of_element_located(
                     (By.XPATH, "//button[contains(., 'Post') or contains(., 'Continue')]")
                 )
             )
 
-            # Clica no botão de confirmar
+            # TERCEIRO: Clica no botão de confirmar
             confirm_btn = self._wait_clickable(
                 By.XPATH,
                 "//button[contains(., 'Post') or contains(., 'Continue') or contains(., 'Publicar')]",
                 timeout=5
             )
-            confirm_btn.click()
-            self.log("✅ Modal de confirmação resolvido")
-            time.sleep(2)
-            return True
+
+            # Tenta clique normal primeiro
+            try:
+                confirm_btn.click()
+                self.log("✅ Modal de confirmação resolvido")
+                time.sleep(2)
+                return True
+            except ElementClickInterceptedException:
+                # Se bloqueado, usa JavaScript
+                self.driver.execute_script("arguments[0].click();", confirm_btn)
+                self.log("✅ Modal de confirmação resolvido (via JS)")
+                time.sleep(2)
+                return True
 
         except TimeoutException:
             # Modal não apareceu (tudo bem)
             return True
         except Exception as e:
             self.log(f"⚠️ Erro no modal de confirmação: {e}")
+            # Tenta JavaScript click como último recurso
+            try:
+                confirm_btns = self.driver.find_elements(
+                    By.XPATH,
+                    "//button[contains(., 'Post') or contains(., 'Continue') or contains(., 'Publicar')]"
+                )
+                if confirm_btns:
+                    self.driver.execute_script("arguments[0].click();", confirm_btns[0])
+                    self.log("✅ Modal resolvido via JS (fallback)")
+                    time.sleep(2)
+            except:
+                pass
             return True  # Não falha por causa disso
 
     def confirm_posted(self) -> bool:
