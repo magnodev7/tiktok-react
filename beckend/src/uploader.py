@@ -614,7 +614,40 @@ class TikTokUploader:
         # 6. Lida com modal de confirmação (pode ter modal "exit" primeiro)
         self.handle_confirmation_dialog()
 
-        # 6.5. Se modal "exit" foi fechado, tenta clicar em Post novamente
+        # 6.5. Verifica se TikTok rejeitou por violação de conteúdo
+        try:
+            violation_texts = [
+                "violation reason",
+                "unoriginal",
+                "low-quality",
+                "violação",
+                "baixa qualidade",
+                "content that is just imported or copied"
+            ]
+
+            page_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
+            violation_detected = any(text in page_text for text in violation_texts)
+
+            if violation_detected:
+                self.log("⚠️ ========================================")
+                self.log("⚠️ TIKTOK REJEITOU O VÍDEO!")
+                self.log("⚠️ Motivo: Conteúdo não-original ou baixa qualidade")
+                self.log("⚠️ Solução: Trocar o vídeo por conteúdo original")
+                self.log("⚠️ ========================================")
+
+                # Salva screenshot do aviso
+                try:
+                    screenshot_path = f"/tmp/tiktok_violation_warning_{int(time.time())}.png"
+                    self.driver.save_screenshot(screenshot_path)
+                    self.log(f"📸 Screenshot do aviso salvo: {screenshot_path}")
+                except:
+                    pass
+
+                return False  # Retorna falha para que vídeo não seja marcado como postado
+        except:
+            pass
+
+        # 6.6. Se modal "exit" foi fechado, tenta clicar em Post novamente
         try:
             # Verifica se ainda está na página de upload (não publicou)
             if "upload" in self.driver.current_url.lower():
