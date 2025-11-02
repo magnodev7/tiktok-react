@@ -431,7 +431,12 @@ class TikTokScheduler:
                     self.close_driver()
 
                 if self.driver is None:
-                    self.driver = get_fresh_driver(None, profile_base_dir=self.USER_DATA_DIR, account_name=self.account)
+                    self.driver = get_fresh_driver(
+                        None,
+                        profile_base_dir=self.USER_DATA_DIR,
+                        account_name=self.account,
+                        headless=not bool(self.visible),
+                    )
 
                 self._chromedriver_pid = getattr(self.driver, "_service_pid", None)
                 self._temp_profile_dir = getattr(self.driver, "_profile_dir", None)

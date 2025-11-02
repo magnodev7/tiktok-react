@@ -23,11 +23,15 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
 from src.scheduler_daemon import start_scheduler_daemon, stop_scheduler_daemon
 
 BASE_DIR = Path(__file__).resolve().parent
 PID_FILE = BASE_DIR / "state" / "scheduler.pid"
 INTERNAL_FLAG = "--_internal_run"
+
+load_dotenv(BASE_DIR / ".env")
+load_dotenv(BASE_DIR.parent / ".env")
 
 
 def _write_pid(pid: int) -> None:
@@ -83,7 +87,13 @@ def _scheduler_loop() -> None:
     os.environ.setdefault("DISPLAY", ":99")
     # Setup logging
     setup_scheduler_logging("logs/scheduler.log")
-    scheduler_daemon = start_scheduler_daemon()
+    raw_visible = os.getenv("TIKTOK_BROWSER_VISIBLE", "")
+    visible = str(raw_visible).strip().lower() in {"1", "true", "yes", "on"}
+    if visible:
+        print("🖥️ Navegador visível habilitado (TIKTOK_BROWSER_VISIBLE)")
+    else:
+        print("🕶️ Modo headless (defina TIKTOK_BROWSER_VISIBLE=1 para exibir o navegador)")
+    scheduler_daemon = start_scheduler_daemon(visible=visible)
 
     current_pid = os.getpid()
     _write_pid(current_pid)

@@ -197,7 +197,8 @@ def get_or_create_driver(
 def get_fresh_driver(
     existing: Optional[webdriver.Chrome] = None,
     profile_base_dir: Optional[str] = None,
-    account_name: Optional[str] = None
+    account_name: Optional[str] = None,
+    headless: bool = True,
 ) -> webdriver.Chrome:
     """
     Compatibilidade com código antigo: sempre cria driver novo.
@@ -218,4 +219,8 @@ def get_fresh_driver(
             pass
 
     # Cria novo driver
-    return build_driver(account_name=account_name, profile_base_dir=profile_base_dir, headless=True)
+    return build_driver(
+        account_name=account_name,
+        profile_base_dir=profile_base_dir,
+        headless=headless,
+    )

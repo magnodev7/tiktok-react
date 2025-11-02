@@ -16,6 +16,7 @@ import uvicorn  # pyright: ignore[reportMissingImports]
 
 from pathlib import Path
 import os, stat, subprocess
+from dotenv import load_dotenv
 
 def _force_perms():
     targets = ["/app/users", "/app/state", "users", "state"]
@@ -37,6 +38,12 @@ def start_http(app):
     server.run()  # roda síncrono; se quiser em thread, suba antes do scheduler
 
 if __name__ == "__main__":
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+    raw_visible = os.getenv("TIKTOK_BROWSER_VISIBLE", "")
+    visible = str(raw_visible).strip().lower() in {"1", "true", "yes", "on"}
+
     # 1) sobe HTTP no thread dedicado PRIMEIRO
     import threading
     from src.http_health import app as http_app
@@ -45,7 +52,11 @@ if __name__ == "__main__":
 
     # 2) Inicia o daemon de schedulers (um scheduler por conta TikTok)
     print("🔄 Iniciando daemon de schedulers multi-conta...")
-    scheduler_daemon = start_scheduler_daemon()
+    if visible:
+        print("🖥️ Navegador visível habilitado (TIKTOK_BROWSER_VISIBLE)")
+    else:
+        print("🕶️ Executando em modo headless (defina TIKTOK_BROWSER_VISIBLE=1 para visualizar o Chrome)")
+    scheduler_daemon = start_scheduler_daemon(visible=visible)
 
     # 3) mantém o processo vivo
     try:
