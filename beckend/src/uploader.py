@@ -476,15 +476,32 @@ class TikTokUploader:
             # Tenta clique normal primeiro
             try:
                 confirm_btn.click()
-                self.log("✅ Modal de confirmação resolvido")
-                time.sleep(2)
-                return True
+                self.log("✅ Modal de confirmação - clique normal executado")
+                time.sleep(3)
             except ElementClickInterceptedException:
                 # Se bloqueado, usa JavaScript
                 self.driver.execute_script("arguments[0].click();", confirm_btn)
-                self.log("✅ Modal de confirmação resolvido (via JS)")
-                time.sleep(2)
-                return True
+                self.log("✅ Modal de confirmação - clique via JS executado")
+                time.sleep(3)
+
+            # DEBUG: Screenshot após clicar para ver o que aconteceu
+            try:
+                screenshot_path = f"/tmp/tiktok_after_confirm_{int(time.time())}.png"
+                self.driver.save_screenshot(screenshot_path)
+                self.log(f"📸 Screenshot após confirmação: {screenshot_path}")
+            except:
+                pass
+
+            # Aguarda modal fechar (se ainda estiver visível)
+            try:
+                WebDriverWait(self.driver, 5).until_not(
+                    EC.visibility_of_element_located((By.CLASS_NAME, "TUXModal-overlay"))
+                )
+                self.log("✅ Modal TUX fechou após confirmação")
+            except:
+                pass
+
+            return True
 
         except TimeoutException:
             # Modal não apareceu (tudo bem)
@@ -500,7 +517,15 @@ class TikTokUploader:
                 if confirm_btns:
                     self.driver.execute_script("arguments[0].click();", confirm_btns[0])
                     self.log("✅ Modal resolvido via JS (fallback)")
-                    time.sleep(2)
+                    time.sleep(3)
+
+                    # DEBUG: Screenshot após fallback
+                    try:
+                        screenshot_path = f"/tmp/tiktok_after_confirm_fallback_{int(time.time())}.png"
+                        self.driver.save_screenshot(screenshot_path)
+                        self.log(f"📸 Screenshot após fallback: {screenshot_path}")
+                    except:
+                        pass
             except:
                 pass
             return True  # Não falha por causa disso
