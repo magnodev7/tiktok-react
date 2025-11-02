@@ -667,7 +667,7 @@ class TikTokScheduler:
         2. Fallback: .meta.json legado
         3. Fallback final: build_caption_for_video() automático
         """
-        from .uploader import TikTokUploader
+        from .uploader_modular import TikTokUploader
         from .caption import build_caption_for_video
 
         # Tenta ler caption do arquivo unificado
