@@ -100,7 +100,7 @@ class TikTokUploader:
                     self.log("⚠️ Redirecionado para login")
                     continue
 
-                # Procura input de arquivo (múltiplos seletores)
+                # Procura input de arquivo (incluindo ocultos)
                 file_input_selectors = [
                     "input[type='file']",
                     "input[accept*='video']",
@@ -111,10 +111,21 @@ class TikTokUploader:
                 found = False
                 for selector in file_input_selectors:
                     try:
+                        # Primeiro tenta método padrão
                         element = self._wait_element(By.CSS_SELECTOR, selector, timeout=5)
                         self.log(f"✅ Campo de upload encontrado com seletor: {selector}")
                         return True
                     except TimeoutException:
+                        # Tenta buscar com JavaScript (encontra elementos ocultos)
+                        try:
+                            elements = self.driver.execute_script(
+                                f"return document.querySelectorAll('{selector}');"
+                            )
+                            if elements and len(elements) > 0:
+                                self.log(f"✅ Campo de upload encontrado (oculto) com seletor: {selector}")
+                                return True
+                        except:
+                            pass
                         continue
 
                 if not found:
@@ -160,17 +171,45 @@ class TikTokUploader:
             self.log(f"❌ Vídeo muito pequeno: {size_bytes} bytes")
             return False
 
-        # Encontra input de arquivo
-        try:
-            file_input = self._wait_element(By.CSS_SELECTOR, "input[type='file']", timeout=WAIT_MED)
-        except TimeoutException:
-            self.log("❌ Input de arquivo não encontrado")
+        # Encontra input de arquivo (incluindo ocultos)
+        file_input = None
+        selectors = [
+            "input[type='file']",
+            "input[accept*='video']",
+            "input[name='file']"
+        ]
+
+        for selector in selectors:
+            try:
+                # Tenta método padrão primeiro
+                file_input = self._wait_element(By.CSS_SELECTOR, selector, timeout=5)
+                self.log(f"✅ Input encontrado: {selector}")
+                break
+            except TimeoutException:
+                # Tenta buscar com JavaScript (encontra ocultos)
+                try:
+                    elements = self.driver.execute_script(
+                        f"return document.querySelectorAll('{selector}');"
+                    )
+                    if elements and len(elements) > 0:
+                        file_input = elements[0]
+                        self.log(f"✅ Input encontrado (oculto): {selector}")
+                        break
+                except:
+                    continue
+
+        if not file_input:
+            self.log("❌ Input de arquivo não encontrado com nenhum seletor")
             return False
 
-        # Envia arquivo
+        # Envia arquivo (mesmo que input esteja oculto, send_keys funciona)
         abs_path = os.path.abspath(video_path)
-        file_input.send_keys(abs_path)
-        self.log(f"⬆️ Arquivo enviado: {abs_path}")
+        try:
+            file_input.send_keys(abs_path)
+            self.log(f"⬆️ Arquivo enviado: {abs_path}")
+        except Exception as e:
+            self.log(f"❌ Erro ao enviar arquivo: {e}")
+            return False
 
         # Aguarda processamento (procura preview ou vídeo)
         try:
