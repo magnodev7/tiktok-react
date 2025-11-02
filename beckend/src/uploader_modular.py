@@ -12,13 +12,13 @@ import os
 from typing import Optional
 
 # Importa módulos especializados
-from modules.video_upload import VideoUploadModule
-from modules.description_handler import DescriptionModule
-from modules.audience_selector import AudienceModule, AudienceType
-from modules.post_action import PostActionModule
-from modules.post_confirmation import PostConfirmationModule
-from modules.file_manager import FileManagerModule
-from modules.duplicate_protection import DuplicateProtectionModule
+from .modules.video_upload import VideoUploadModule
+from .modules.description_handler import DescriptionModule
+from .modules.audience_selector import AudienceModule, AudienceType
+from .modules.post_action import PostActionModule
+from .modules.post_confirmation import PostConfirmationModule
+from .modules.file_manager import FileManagerModule
+from .modules.duplicate_protection import DuplicateProtectionModule
 
 
 class TikTokUploader:
@@ -334,13 +334,13 @@ class TikTokUploader:
     @staticmethod
     def _normalize_text(text: str) -> str:
         """Compatibilidade: normalização de texto"""
-        from modules.video_upload import VideoUploadModule
+        from .modules.video_upload import VideoUploadModule
         return VideoUploadModule._normalize_text(text)
 
     @staticmethod
     def _shorten_text(text: str) -> str:
         """Compatibilidade: encurtamento de texto"""
-        from modules.video_upload import VideoUploadModule
+        from .modules.video_upload import VideoUploadModule
         return VideoUploadModule._shorten_text(text)
 
 
