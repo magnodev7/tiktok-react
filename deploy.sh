@@ -56,6 +56,7 @@ DEV_MODE=false
 # Detecta distribuição (Ubuntu vs Debian)
 OS_ID=$(source /etc/os-release && echo "${ID}")
 OS_ID_LIKE=$(source /etc/os-release && echo "${ID_LIKE}")
+UBUNTU_CODENAME=$(source /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
 IS_UBUNTU=false
 IS_DEBIAN=false
 if [[ "${OS_ID}" == "ubuntu" || "${OS_ID_LIKE}" == *"ubuntu"* ]]; then
@@ -64,6 +65,9 @@ fi
 if [[ "${OS_ID}" == "debian" || "${OS_ID_LIKE}" == *"debian"* ]]; then
     IS_DEBIAN=true
 fi
+
+# Python bin a ser usado para venv (setado em check_dependencies)
+PYBIN=""
 
 # ════════════════════════════════════════════════════════════════════════════
 # FUNÇÕES HELPER
@@ -109,6 +113,89 @@ confirm() {
 }
 
 # ════════════════════════════════════════════════════════════════════════════
+# INSTALADOR RESILIENTE DE PYTHON
+# ════════════════════════════════════════════════════════════════════════════
+
+_install_python_resiliente() {
+    # Tenta instalar Python 3.11; se indisponível, tenta 3.10; se falhar, tenta 3.12.
+    # Último recurso: pyenv. Ao final, define PYBIN com o binário a ser usado na venv.
+    local TARGET="3.11"
+    local FALLBACKS=("3.10" "3.12")
+    local ARCH="$(dpkg --print-architecture 2>/dev/null || echo unknown)"
+    local CODENAME="$UBUNTU_CODENAME"
+
+    print_info "Detectado: codename=${CODENAME:-desconhecido} arch=$ARCH"
+
+    local _install_via_apt() {
+        local ver="$1"
+        print_info "Tentando instalar Python ${ver} via APT..."
+        sudo apt-get update -qq
+        sudo apt-get install -y "python${ver}" "python${ver}-venv" "python${ver}-dev" python3-pip && return 0
+        return 1
+    }
+
+    local _ensure_deadsnakes() {
+        if ! grep -Rq "ppa.launchpad.net/deadsnakes/ppa" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+            print_info "Adicionando PPA deadsnakes..."
+            sudo apt-get update -qq
+            sudo apt-get install -y software-properties-common
+            sudo add-apt-repository -y ppa:deadsnakes/ppa
+        fi
+    }
+
+    # Ubuntu 20.04 geralmente precisa do deadsnakes
+    if [ "$IS_UBUNTU" = true ] && [ "$CODENAME" = "focal" ]; then
+        _ensure_deadsnakes
+    fi
+
+    # 1) Tenta 3.11
+    if _install_via_apt "$TARGET"; then
+        PYBIN="$(command -v python${TARGET})"
+    else
+        print_warning "python${TARGET} indisponível nos repositórios atuais."
+        # 2) Tenta fallbacks
+        for v in "${FALLBACKS[@]}"; do
+            if _install_via_apt "$v"; then
+                PYBIN="$(command -v python${v})"
+                break
+            fi
+        done
+    fi
+
+    # 3) pyenv, último recurso
+    if [ -z "$PYBIN" ]; then
+        print_warning "Pacotes APT indisponíveis para Python 3.11/3.10/3.12. Partindo para pyenv..."
+        sudo apt-get update -qq
+        sudo apt-get install -y make build-essential libssl-dev zlib1g-dev \
+            libbz2-dev libreadline-dev libsqlite3-dev curl llvm libncursesw5-dev \
+            xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev git
+
+        if [ ! -d "$HOME/.pyenv" ]; then
+            git clone https://github.com/pyenv/pyenv.git "$HOME/.pyenv"
+        fi
+
+        export PYENV_ROOT="$HOME/.pyenv"
+        export PATH="$PYENV_ROOT/bin:$PATH"
+        eval "$(pyenv init -)"
+
+        for vfull in "3.11.9" "3.10.14"; do
+            if pyenv install -s "$vfull"; then
+                pyenv global "$vfull"
+                PYBIN="$(command -v python3)"
+                break
+            fi
+        done
+
+        if [ -z "$PYBIN" ]; then
+            print_error "Falha ao instalar Python via pyenv."
+            exit 1
+        fi
+    fi
+
+    print_success "Python selecionado para venv: $($PYBIN --version 2>/dev/null)"
+}
+
+# ════════════════════════════════════════════════════════════════════════════
 # VERIFICAÇÃO DE DEPENDÊNCIAS
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -117,7 +204,6 @@ check_dependencies() {
 
     local needs_update=false
 
-    # Atualizar cache de pacotes se necessário
     update_apt_if_needed() {
         if [ "$needs_update" = false ]; then
             print_info "Atualizando cache de pacotes apt..."
@@ -126,9 +212,7 @@ check_dependencies() {
         fi
     }
 
-    # ═══════════════════════════════════════════════════════════════
-    # DOCKER
-    # ═══════════════════════════════════════════════════════════════
+    # ── DOCKER ───────────────────────────────────────────────────────────────
     print_step "Verificando Docker..."
     if command -v docker &> /dev/null; then
         local docker_version=$(docker --version | cut -d ' ' -f3 | tr -d ',')
@@ -136,230 +220,101 @@ check_dependencies() {
     else
         print_warning "Docker não encontrado. Instalando..."
         update_apt_if_needed
-
-        # Instalar dependências do Docker
         sudo apt install -y ca-certificates curl gnupg lsb-release
-
-        # Adicionar chave GPG oficial do Docker
         sudo install -m 0755 -d /etc/apt/keyrings
         curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes 2>/dev/null || true
         sudo chmod a+r /etc/apt/keyrings/docker.gpg
-
-        # Adicionar repositório Docker
-        echo \
-          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-          $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-        # Atualizar e instalar Docker
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+          | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
         sudo apt update -qq
         sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-        # Iniciar e habilitar Docker
         sudo systemctl start docker
         sudo systemctl enable docker
-
-        # Adicionar usuário ao grupo docker
         sudo usermod -aG docker $USER
-
-        # Aplicar permissões do grupo docker imediatamente (sem precisar logout/login)
         print_info "Aplicando permissões do grupo docker..."
-
-        # Método 1: newgrp (cria subshell com novo grupo)
-        # newgrp docker << END_NEWGRP
-        # docker --version
-        # END_NEWGRP
-
-        # Método 2: Atualizar grupos da sessão atual (mais confiável para scripts)
-        if [ -n "$SUDO_USER" ]; then
-            # Se rodando com sudo, usar o usuário original
-            su - $SUDO_USER -c "groups" > /dev/null 2>&1
-        fi
-
-        # Força atualização das permissões para o docker daemon
-        sudo chmod 666 /var/run/docker.sock
-
+        sudo chmod 666 /var/run/docker.sock || true
         print_success "Docker instalado com sucesso!"
-        print_info "Permissões aplicadas - você pode usar docker sem sudo agora"
     fi
 
-    # ═══════════════════════════════════════════════════════════════
-    # DOCKER COMPOSE (versão robusta)
-    # ═══════════════════════════════════════════════════════════════
+    # ── DOCKER COMPOSE ───────────────────────────────────────────────────────
     print_step "Verificando Docker Compose..."
-
     is_docker_compose_valid() {
-        if ! command -v docker-compose &> /dev/null; then
-            return 1
-        fi
-
-        local version_output
-        version_output=$(docker-compose --version 2>/dev/null) || return 1
-
-        if [[ "$version_output" == *"vbuild"* ]] || [[ ${#version_output} -lt 20 ]]; then
-            return 1
-        fi
-
-        if [[ "$version_output" =~ v2\. ]] || [[ "$version_output" =~ v1\.29 ]]; then
-            return 0
-        fi
-
+        if ! command -v docker-compose &> /dev/null; then return 1; fi
+        local out; out=$(docker-compose --version 2>/dev/null) || return 1
+        if [[ "$out" == *"vbuild"* ]] || [[ ${#out} -lt 20 ]]; then return 1; fi
+        if [[ "$out" =~ v2\. ]] || [[ "$out" =~ v1\.29 ]]; then return 0; fi
         return 1
     }
-
     if is_docker_compose_valid; then
-        local compose_version
-        compose_version=$(docker-compose --version | cut -d ' ' -f4 | tr -d ',')
+        local compose_version; compose_version=$(docker-compose --version | awk '{print $3}' | tr -d ',')
         print_success "Docker Compose válido instalado: v$compose_version"
     else
         print_warning "Docker Compose ausente, inválido ou desatualizado. Reinstalando..."
-
         sudo rm -f /usr/bin/docker-compose /usr/local/bin/docker-compose
-
         local compose_version
         compose_version=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d\" -f4)
-
         if [ -z "$compose_version" ]; then
             print_error "Falha ao obter a versão mais recente do Docker Compose"
             exit 1
         fi
-
         print_info "Instalando Docker Compose $compose_version..."
         sudo curl -L "https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-$(uname -s)-$(uname -m)" \
             -o /usr/local/bin/docker-compose
         sudo chmod +x /usr/local/bin/docker-compose
         sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
-
         print_success "Docker Compose instalado: $compose_version"
     fi
-
-    # Garante que o plugin `docker compose` também esteja disponível
     if ! docker compose version &> /dev/null; then
         update_apt_if_needed
         sudo apt install -y docker-compose-plugin 2>/dev/null || true
     fi
 
-    # ═══════════════════════════════════════════════════════════════
-    # PYTHON 3.11
-    # ═══════════════════════════════════════════════════════════════
-    print_step "Verificando Python 3.11..."
-    if command -v python3.11 &> /dev/null; then
-        local python_version=$(python3.11 --version | cut -d ' ' -f2)
-        print_success "Python 3.11 instalado: $python_version"
+    # ── PYTHON (resiliente: 3.11 preferido) ──────────────────────────────────
+    print_step "Verificando Python (3.11 preferido)..."
+    if command -v python3.11 >/dev/null 2>&1; then
+        PYBIN="$(command -v python3.11)"
+        print_success "Python 3.11 disponível: $($PYBIN --version)"
     else
-        print_warning "Python 3.11 não encontrado. Instalando..."
+        _install_python_resiliente
+    fi
+
+    # ── PIP e VENV ──────────────────────────────────────────────────────────
+    print_step "Verificando pip/venv..."
+    if ! "$PYBIN" -m pip --version >/dev/null 2>&1; then
         update_apt_if_needed
-        if [ "$IS_UBUNTU" = true ]; then
-            sudo apt install -y software-properties-common
-            sudo add-apt-repository -y ppa:deadsnakes/ppa
-        else
-            sudo apt install -y software-properties-common || true
-        fi
-        sudo apt update -qq
-        if sudo apt install -y python3.11 python3.11-venv python3.11-dev python3-pip; then
-            python_version=$(python3.11 --version | cut -d ' ' -f2)
-            print_success "Python 3.11 instalado: $python_version"
-        else
-            print_error "Não foi possível instalar Python 3.11 automaticamente. Verifique repositórios compatíveis com sua distribuição."
-            exit 1
-        fi
+        sudo apt install -y python3-pip || true
     fi
-
-    # Garante que python3 aponta para 3.11
-    local current_python=$(python3 --version 2>/dev/null | cut -d ' ' -f2)
-    if [[ "$current_python" != 3.11* ]]; then
-        print_info "Atualizando alternativas para apontar python3 → python3.11"
-        sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
-        sudo update-alternatives --set python3 /usr/bin/python3.11
-        current_python=$(python3 --version 2>/dev/null | cut -d ' ' -f2)
-    fi
-    print_success "python3 em uso: $current_python"
-
-    # ═══════════════════════════════════════════════════════════════
-    # PIP E VENV
-    # ═══════════════════════════════════════════════════════════════
-    print_step "Verificando pip..."
-    if command -v pip3 &> /dev/null || python3 -m pip --version &> /dev/null 2>&1; then
-        print_success "pip instalado"
-    else
-        print_warning "pip não encontrado. Instalando..."
+    if ! "$PYBIN" -m venv -h >/dev/null 2>&1; then
+        local MM; MM="$($PYBIN -V | awk '{print $2}' | cut -d'.' -f1,2)"
         update_apt_if_needed
-        sudo apt install -y python3-pip python3-venv
-        print_success "pip instalado"
+        sudo apt install -y "python${MM}-venv" || sudo apt install -y python3-venv || true
     fi
+    print_success "pip/venv OK com $($PYBIN -V)"
 
-    # ═══════════════════════════════════════════════════════════════
-    # PYTHON3-VENV (versão específica para a versão do Python)
-    # ═══════════════════════════════════════════════════════════════
-    print_step "Verificando python3-venv (versão específica)..."
-
-    PYTHON_VERSION=$(python3 --version 2>/dev/null | cut -d' ' -f2)
-    if [ -z "$PYTHON_VERSION" ]; then
-        print_error "Python 3 não está instalado corretamente"
-        exit 1
-    fi
-
-    PYTHON_MAJOR_MINOR=$(echo "$PYTHON_VERSION" | cut -d'.' -f1,2)
-    VENV_PACKAGE="python${PYTHON_MAJOR_MINOR}-venv"
-
-    if python3 -m venv --help >/dev/null 2>&1; then
-        print_success "Ambiente virtual suportado (via $VENV_PACKAGE ou equivalente)"
-    else
-        print_warning "Suporte a 'venv' não disponível. Instalando $VENV_PACKAGE..."
-        update_apt_if_needed
-
-        if sudo apt install -y "$VENV_PACKAGE"; then
-            print_success "$VENV_PACKAGE instalado com sucesso"
-        else
-            print_warning "Falha ao instalar $VENV_PACKAGE. Tentando python3-venv..."
-            if sudo apt install -y python3-venv; then
-                print_success "python3-venv instalado como fallback"
-            else
-                print_error "Falha crítica: não foi possível instalar suporte a 'venv'"
-                exit 1
-            fi
-        fi
-
-        if ! python3 -m venv --help >/dev/null 2>&1; then
-            print_error "Mesmo após instalação, 'python3 -m venv' não está funcional"
-            exit 1
-        fi
-    fi
-
-    # ═══════════════════════════════════════════════════════════════
-    # NODE.JS 20+
-    # ═══════════════════════════════════════════════════════════════
+    # ── NODE.JS 20+ ─────────────────────────────────────────────────────────
     print_step "Verificando Node.js..."
     if command -v node &> /dev/null; then
-        local node_version=$(node --version | cut -d'v' -f2 | cut -d'.' -f1)
-        local node_full=$(node --version)
-
-        if [ "$node_version" -lt 20 ]; then
-            print_warning "Node.js $node_full instalado (versão antiga, necessário v20+)"
-            print_info "Atualizando Node.js para versão 20..."
-
-            # Remover Node.js antigo
+        local node_major; node_major=$(node -v | tr -d 'v' | cut -d'.' -f1)
+        local node_full; node_full=$(node -v)
+        if [ "$node_major" -lt 20 ]; then
+            print_warning "Node.js $node_full instalado (precisa v20+). Atualizando..."
             sudo apt remove -y nodejs npm 2>/dev/null || true
-
-            # Instalar Node.js 20
             curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
             sudo apt install -y nodejs
-
-            node_full=$(node --version)
-            print_success "Node.js atualizado para: $node_full"
+            node_full=$(node -v)
+            print_success "Node.js atualizado: $node_full"
         else
-            print_success "Node.js instalado: $node_full (OK)"
+            print_success "Node.js instalado: $node_full"
         fi
     else
         print_warning "Node.js não encontrado. Instalando Node.js 20..."
         curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
         sudo apt install -y nodejs
-        local node_full=$(node --version)
+        local node_full; node_full=$(node -v)
         print_success "Node.js instalado: $node_full"
     fi
 
-    # ═══════════════════════════════════════════════════════════════
-    # NPM
-    # ═══════════════════════════════════════════════════════════════
+    # ── NPM ─────────────────────────────────────────────────────────────────
     print_step "Verificando npm..."
     if command -v npm &> /dev/null; then
         local npm_version=$(npm --version)
@@ -371,52 +326,43 @@ check_dependencies() {
         print_success "npm instalado: $npm_version"
     fi
 
-    # ═══════════════════════════════════════════════════════════════
-    # GOOGLE CHROME (para automações Selenium)
-    # ═══════════════════════════════════════════════════════════════
+    # ── GOOGLE CHROME (Selenium) ────────────────────────────────────────────
     print_step "Verificando Google Chrome..."
     if command -v google-chrome &> /dev/null; then
-        local chrome_version
-        chrome_version=$(google-chrome --version 2>/dev/null || true)
+        local chrome_version; chrome_version=$(google-chrome --version 2>/dev/null || true)
         print_success "Google Chrome instalado: ${chrome_version:-versão desconhecida}"
     else
         print_warning "Google Chrome não encontrado. Instalando..."
-
         update_apt_if_needed
-        wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add - >/dev/null 2>&1
 
-        local chrome_list="/etc/apt/sources.list.d/google-chrome.list"
-        print_info "Configurando repositório do Google Chrome"
-        sudo tee "$chrome_list" >/dev/null <<'EOF'
-### THIS FILE IS AUTOMATICALLY CONFIGURED ###
+        # Repositório Chrome (forma compatível com 20.04+)
+        sudo install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /etc/apt/keyrings/google-linux.gpg
+        sudo chmod a+r /etc/apt/keyrings/google-linux.gpg
+        sudo tee /etc/apt/sources.list.d/google-chrome.list <<'EOF' >/dev/null
+### THIS FILE IS AUTOMATICALLY CONFIGURED
 # You may comment out this entry, but any other modifications may be lost.
-deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main
+deb [arch=amd64 signed-by=/etc/apt/keyrings/google-linux.gpg] http://dl.google.com/linux/chrome/deb/ stable main
 EOF
-
         sudo apt update -qq
-        sudo apt install -y google-chrome-stable
-
+        sudo apt install -y google-chrome-stable || print_warning "Falha ao instalar Google Chrome. Instale manualmente se precisar do Selenium."
         if command -v google-chrome &> /dev/null; then
             chrome_version=$(google-chrome --version 2>/dev/null || true)
             print_success "Google Chrome instalado: ${chrome_version:-versão desconhecida}"
         else
-            print_warning "Não foi possível instalar o Google Chrome automaticamente. Instale manualmente e execute o script novamente."
+            print_warning "Chrome ainda indisponível."
         fi
     fi
 
-    # ═══════════════════════════════════════════════════════════════
-    # FERRAMENTAS ADICIONAIS
-    # ═══════════════════════════════════════════════════════════════
+    # ── FERRAMENTAS EXTRAS ──────────────────────────────────────────────────
     print_step "Verificando ferramentas adicionais..."
     local extra_tools=("curl" "git" "build-essential")
     local missing_tools=()
-
     for tool in "${extra_tools[@]}"; do
         if ! dpkg -l | grep -q "^ii  $tool "; then
             missing_tools+=("$tool")
         fi
     done
-
     if [ ${#missing_tools[@]} -gt 0 ]; then
         print_info "Instalando ferramentas adicionais: ${missing_tools[*]}"
         update_apt_if_needed
@@ -445,7 +391,6 @@ setup_database() {
 
     cd "$BACKEND_DIR"
 
-    # Verifica se docker-compose.yml existe
     if [ ! -f "docker-compose.yml" ]; then
         print_error "docker-compose.yml não encontrado em $BACKEND_DIR"
         exit 1
@@ -488,29 +433,30 @@ setup_backend() {
 
     cd "$BACKEND_DIR"
 
-    # Criar ambiente virtual
+    # Criar ambiente virtual com PYBIN detectado
     print_step "Criando ambiente virtual Python..."
+    if [ -z "$PYBIN" ]; then
+        # fallback extremo: usa python3 padrão
+        PYBIN="$(command -v python3 || true)"
+    fi
+    if [ -z "$PYBIN" ]; then
+        print_error "Python não encontrado no PATH."
+        exit 1
+    fi
+
     if [ ! -d "venv" ] || [ ! -f "venv/bin/activate" ]; then
-        print_info "Criando ou reparando ambiente virtual..."
-        if python3 -m venv venv; then
+        print_info "Criando ou reparando ambiente virtual com $($PYBIN -V)..."
+        if "$PYBIN" -m venv venv; then
             print_success "Ambiente virtual pronto"
         else
-            print_warning "Falha ao criar o ambiente virtual. Instalando dependências 'python3-venv'..."
+            print_warning "Falha ao criar o ambiente virtual. Instalando suporte a venv..."
             if command -v apt-get &>/dev/null; then
                 sudo apt-get update -qq || true
-                if ! sudo apt-get install -y python3-venv; then
-                    local py_minor
-                    py_minor=$(python3 --version | awk '{print $2}' | cut -d'.' -f1,2)
-                    sudo apt-get install -y "python${py_minor}-venv" || true
-                fi
+                local MM; MM="$($PYBIN -V | awk '{print $2}' | cut -d'.' -f1,2)"
+                sudo apt-get install -y "python${MM}-venv" || sudo apt-get install -y python3-venv || true
             fi
-
-            if python3 -m venv venv; then
-                print_success "Ambiente virtual pronto após instalar python-venv"
-            else
-                print_error "Falha ao preparar o ambiente virtual mesmo após instalar python-venv"
-                exit 1
-            fi
+            "$PYBIN" -m venv venv || { print_error "Falha ao preparar o ambiente virtual"; exit 1; }
+            print_success "Ambiente virtual pronto após instalar venv"
         fi
     else
         print_info "Ambiente virtual já existe"
@@ -548,7 +494,6 @@ setup_backend() {
 
     # Criar diretórios necessários no projeto root
     print_step "Criando diretórios necessários..."
-    # $SCRIPT_DIR é o diretório raiz do projeto (onde está o deploy.sh)
     mkdir -p "$SCRIPT_DIR/videos" "$SCRIPT_DIR/posted" "$SCRIPT_DIR/profiles" "$SCRIPT_DIR/state"
 
     # Criar arquivos JSON iniciais se não existirem
@@ -556,14 +501,12 @@ setup_backend() {
         echo '[]' > "$SCRIPT_DIR/state/schedules.json"
         print_info "Arquivo schedules.json criado"
     fi
-
     if [ ! -f "$SCRIPT_DIR/state/logs.json" ]; then
         echo '{"logs": []}' > "$SCRIPT_DIR/state/logs.json"
         print_info "Arquivo logs.json criado"
     fi
 
     print_success "Diretórios e arquivos iniciais criados com sucesso"
-
     print_success "Backend configurado com sucesso!"
 }
 
@@ -612,14 +555,12 @@ setup_frontend() {
 
     cd "$FRONTEND_DIR"
 
-    # Verificar se package.json existe
     if [ ! -f "package.json" ]; then
         print_error "package.json não encontrado em $FRONTEND_DIR"
         exit 1
     fi
 
     print_step "Instalando dependências do Node.js..."
-    # Remover package-lock.json para evitar problemas com native bindings
     rm -f package-lock.json
     npm install
     print_success "Dependências do frontend instaladas"
@@ -628,7 +569,6 @@ setup_frontend() {
     npx vite build
     print_success "Build do frontend concluído"
 
-    # Copiar build para o backend
     if [ -d "dist" ]; then
         print_step "Copiando build para o backend..."
         rm -rf "$BACKEND_DIR/web"
@@ -651,7 +591,6 @@ setup_nginx() {
 
     print_header "CONFIGURANDO NGINX"
 
-    # Verificar se Nginx está instalado
     print_step "Verificando instalação do Nginx..."
     if ! command -v nginx &> /dev/null; then
         print_warning "Nginx não está instalado. Instalando..."
@@ -662,19 +601,18 @@ setup_nginx() {
         print_success "Nginx já está instalado"
     fi
 
-    # Detectar IP do servidor
     print_step "Detectando IP do servidor..."
-    local SERVER_IP=$(hostname -I | awk '{print $1}')
+    local SERVER_IP
+    SERVER_IP=$(hostname -I | awk '{print $1}')
     if [ -z "$SERVER_IP" ]; then
         SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || echo "localhost")
     fi
     print_info "IP detectado: $SERVER_IP"
 
-    # Perguntar sobre domínio
     local DOMAIN=""
     local USE_DOMAIN=false
 
-    if [ -t 0 ]; then  # Verifica se está em terminal interativo
+    if [ -t 0 ]; then
         echo ""
         echo -ne "${CYAN}?${NC} Você tem um domínio configurado? [y/N]: "
         read -n 1 -r
@@ -689,12 +627,10 @@ setup_nginx() {
         fi
     fi
 
-    # Criar configuração do Nginx
     print_step "Criando configuração do Nginx..."
     local NGINX_CONF="/tmp/tiktok-nginx-$$.conf"
 
     if [ "$USE_DOMAIN" = true ]; then
-        # Configuração com domínio (HTTP + suporte futuro para HTTPS)
         cat > "$NGINX_CONF" <<EOF
 # Configuração HTTP (IP e Domínio)
 server {
@@ -702,19 +638,15 @@ server {
     listen [::]:80;
     server_name $SERVER_IP $DOMAIN;
 
-    # Logs
     access_log /var/log/nginx/tiktok-access.log;
     error_log /var/log/nginx/tiktok-error.log;
 
-    # Tamanho máximo de upload (para vídeos)
     client_max_body_size 500M;
 
-    # Proxy para a aplicação
     location / {
         proxy_pass http://localhost:8082;
         proxy_http_version 1.1;
 
-        # Headers para WebSocket e proxy reverso
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
         proxy_set_header Host \$host;
@@ -722,7 +654,6 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
 
-        # Timeouts para uploads longos
         proxy_connect_timeout 600;
         proxy_send_timeout 600;
         proxy_read_timeout 600;
@@ -733,7 +664,6 @@ EOF
         print_info "Configuração criada para domínio: $DOMAIN"
         print_info "Para habilitar HTTPS, execute: sudo certbot --nginx -d $DOMAIN"
     else
-        # Configuração apenas com IP
         cat > "$NGINX_CONF" <<EOF
 # Configuração HTTP (somente IP)
 server {
@@ -741,19 +671,15 @@ server {
     listen [::]:80 default_server;
     server_name $SERVER_IP _;
 
-    # Logs
     access_log /var/log/nginx/tiktok-access.log;
     error_log /var/log/nginx/tiktok-error.log;
 
-    # Tamanho máximo de upload (para vídeos)
     client_max_body_size 500M;
 
-    # Proxy para a aplicação
     location / {
         proxy_pass http://localhost:8082;
         proxy_http_version 1.1;
 
-        # Headers para WebSocket e proxy reverso
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
         proxy_set_header Host \$host;
@@ -761,7 +687,6 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
 
-        # Timeouts para uploads longos
         proxy_connect_timeout 600;
         proxy_send_timeout 600;
         proxy_read_timeout 600;
@@ -772,12 +697,10 @@ EOF
         print_info "Configuração criada para IP: $SERVER_IP"
     fi
 
-    # Copiar configuração
     print_step "Instalando configuração..."
     sudo cp "$NGINX_CONF" /etc/nginx/sites-available/tiktok
     rm -f "$NGINX_CONF"
 
-    # Criar link simbólico se não existir
     if [ ! -L /etc/nginx/sites-enabled/tiktok ]; then
         sudo ln -sf /etc/nginx/sites-available/tiktok /etc/nginx/sites-enabled/tiktok
         print_success "Site habilitado"
@@ -785,14 +708,12 @@ EOF
         print_info "Site já está habilitado"
     fi
 
-    # Remover configuração default se existir (evita conflitos)
     if [ -L /etc/nginx/sites-enabled/default ]; then
         print_step "Removendo configuração default..."
         sudo rm -f /etc/nginx/sites-enabled/default
         print_success "Configuração default removida"
     fi
 
-    # Testar configuração
     print_step "Testando configuração do Nginx..."
     if sudo nginx -t; then
         print_success "Configuração válida"
@@ -801,27 +722,21 @@ EOF
         return 1
     fi
 
-    # Reiniciar Nginx
     print_step "Reiniciando Nginx..."
     sudo systemctl restart nginx
     sudo systemctl enable nginx
     print_success "Nginx reiniciado e habilitado"
 
-    # ═══════════════════════════════════════════════════════════════
-    # CONFIGURAR SSL/HTTPS (se tiver domínio)
-    # ═══════════════════════════════════════════════════════════════
     if [ "$USE_DOMAIN" = true ]; then
         echo ""
         print_step "Configurando SSL/HTTPS com Let's Encrypt..."
 
-        # Instalar Certbot e plugin Nginx
         if ! command -v certbot &> /dev/null; then
             print_info "Instalando Certbot..."
             sudo apt update
             sudo apt install -y certbot python3-certbot-nginx
             print_success "Certbot instalado"
         else
-            # Verificar se o plugin nginx está instalado
             if ! dpkg -l | grep -q python3-certbot-nginx; then
                 print_info "Instalando plugin Nginx do Certbot..."
                 sudo apt update
@@ -832,7 +747,6 @@ EOF
             fi
         fi
 
-        # Perguntar se deseja configurar SSL agora
         echo ""
         echo -ne "${CYAN}?${NC} Deseja configurar SSL/HTTPS agora? [Y/n]: "
         read -n 1 -r
@@ -843,12 +757,10 @@ EOF
             print_warning "Certifique-se que o DNS do domínio está apontando para este servidor!"
             echo ""
 
-            # Pedir email para o Let's Encrypt
             echo -ne "${CYAN}?${NC} Digite seu email para notificações do Let's Encrypt: "
             read LE_EMAIL
 
             if [ -n "$LE_EMAIL" ]; then
-                # Executar certbot
                 print_info "Obtendo certificado SSL..."
                 sudo certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email "$LE_EMAIL" --redirect
 
@@ -856,34 +768,26 @@ EOF
                     print_success "SSL configurado com sucesso!"
                     print_info "Acesse: https://$DOMAIN"
 
-                    # Configurar renovação automática
                     echo ""
                     print_step "Configurando renovação automática do certificado..."
-
-                    # Garantir que o timer do certbot está ativo
                     if sudo systemctl is-enabled certbot.timer &>/dev/null; then
                         print_success "Timer de renovação já está habilitado"
                     else
                         sudo systemctl enable certbot.timer
                         print_success "Timer de renovação habilitado"
                     fi
-
                     if sudo systemctl is-active certbot.timer &>/dev/null; then
                         print_success "Timer de renovação está ativo"
                     else
                         sudo systemctl start certbot.timer
                         print_success "Timer de renovação iniciado"
                     fi
-
-                    # Testar renovação
                     print_info "Testando processo de renovação..."
                     if sudo certbot renew --dry-run &>/dev/null; then
                         print_success "Teste de renovação passou!"
                     else
                         print_warning "Teste de renovação falhou, mas certificado está instalado"
                     fi
-
-                    # Criar hook de pós-renovação para reiniciar Nginx
                     sudo mkdir -p /etc/letsencrypt/renewal-hooks/post
                     echo '#!/bin/bash' | sudo tee /etc/letsencrypt/renewal-hooks/post/nginx-reload.sh > /dev/null
                     echo 'systemctl reload nginx' | sudo tee -a /etc/letsencrypt/renewal-hooks/post/nginx-reload.sh > /dev/null
@@ -909,7 +813,6 @@ EOF
         fi
     fi
 
-    # Informações finais
     echo ""
     print_success "Nginx configurado com sucesso!"
     if [ "$USE_DOMAIN" = true ]; then
@@ -972,11 +875,8 @@ final_verification() {
 show_final_info() {
     print_header "DEPLOY CONCLUÍDO COM SUCESSO! 🎉"
 
-    # Detectar IP para mostrar nas informações
     local SERVER_IP=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "localhost")
     local ACCESS_URL="http://$SERVER_IP"
-
-    # Se Nginx não foi configurado, usar localhost:8082
     if [ "$SKIP_NGINX" = true ]; then
         ACCESS_URL="http://localhost:8082"
     fi
@@ -1044,30 +944,12 @@ show_help() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --skip-db)
-                SKIP_DB=true
-                shift
-                ;;
-            --skip-fe)
-                SKIP_FE=true
-                shift
-                ;;
-            --skip-nginx)
-                SKIP_NGINX=true
-                shift
-                ;;
-            --dev)
-                DEV_MODE=true
-                SKIP_NGINX=true  # Em modo dev, não configura nginx
-                shift
-                ;;
-            --help|-h)
-                show_help
-                ;;
-            *)
-                print_error "Opção desconhecida: $1"
-                show_help
-                ;;
+            --skip-db)     SKIP_DB=true; shift ;;
+            --skip-fe)     SKIP_FE=true; shift ;;
+            --skip-nginx)  SKIP_NGINX=true; shift ;;
+            --dev)         DEV_MODE=true; SKIP_NGINX=true; shift ;;
+            --help|-h)     show_help ;;
+            *)             print_error "Opção desconhecida: $1"; show_help ;;
         esac
     done
 }
@@ -1077,7 +959,6 @@ parse_args() {
 # ════════════════════════════════════════════════════════════════════════════
 
 main() {
-    # Clear screen se TERM estiver configurado
     if [ -n "$TERM" ] && [ "$TERM" != "dumb" ]; then
         clear 2>/dev/null || true
     fi
@@ -1095,14 +976,12 @@ main() {
     print_info "Frontend: $FRONTEND_DIR"
     echo ""
 
-    # Parsing de argumentos
     parse_args "$@"
 
     print_info "Iniciando deploy automático..."
     echo ""
     sleep 2
 
-    # Execução dos passos
     check_dependencies
     setup_database
     setup_backend
@@ -1128,8 +1007,5 @@ main() {
 # EXECUÇÃO
 # ════════════════════════════════════════════════════════════════════════════
 
-# Trap para capturar erros
 trap 'print_error "Erro na linha $LINENO. Deploy falhou!"; exit 1' ERR
-
-# Executar
 main "$@"
