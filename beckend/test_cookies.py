@@ -69,6 +69,22 @@ def main():
         else:
             print("❌ load_cookies_for_account retornou False — cookies inválidos/ausentes.")
             print("💡 Verifique o storage de cookies (ex.: state/accounts/novadigitalbra_cookies.json)")
+            try:
+                cookie_names = [c.get("name") for c in driver.get_cookies()]
+                print(f"   Cookies carregados no driver: {cookie_names}")
+            except Exception as debug_err:
+                print(f"   ⚠️ Falha ao ler cookies do driver: {debug_err}")
+
+            try:
+                current_url = driver.current_url
+                print(f"   URL atual após tentativa: {current_url}")
+                page_snippet = driver.page_source[:500].replace("\n", " ")
+                print(f"   Trecho da página: {page_snippet} ...")
+                screenshot_path = Path(__file__).parent / "cookies_debug.png"
+                if driver.save_screenshot(str(screenshot_path)):
+                    print(f"   📸 Screenshot salvo em: {screenshot_path}")
+            except Exception as debug_err:
+                print(f"   ⚠️ Falha ao coletar debug adicional: {debug_err}")
 
     except Exception as e:
         print(f"⚠️ Erro durante o teste: {e}")
