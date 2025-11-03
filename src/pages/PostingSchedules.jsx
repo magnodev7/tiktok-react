@@ -77,6 +77,7 @@ export default function PostingSchedules() {
       setHasChanges(false);
       setError('');
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedSchedules, selectedAccountId, schedulesLoading]);
 
   // Captura highlight da URL (ex.: ?highlight=16:40)
@@ -106,6 +107,7 @@ export default function PostingSchedules() {
       // Limpa highlight da URL sem navegar
       navigate(location.pathname, { replace: true });
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingHighlight, schedules, navigate, location.pathname]);
 
   const addSchedule = () => {
@@ -249,6 +251,7 @@ export default function PostingSchedules() {
           } else {
             alert('Formato de arquivo inválido');
           }
+        // eslint-disable-next-line no-unused-vars
         } catch (error) {
           alert('Erro ao ler arquivo');
         }

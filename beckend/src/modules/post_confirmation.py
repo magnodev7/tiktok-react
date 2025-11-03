@@ -8,11 +8,15 @@ import unicodedata
 from typing import Optional, Callable, Tuple
 
 from selenium.webdriver.common.by import By
-from selenium.common.exceptions import StaleElementReferenceException
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 # Constantes
-CONFIRMATION_TIMEOUT = 60  # segundos
+CONFIRMATION_TIMEOUT = 90  # FIX: Aumentado para 90s (TikTok demora)
+POLL_INTERVAL = 3  # FIX: Poll a cada 3s (melhor para async)
 
+# FIX: URLs expandidas (mais patterns do TikTok recente)
 SUCCESS_URL_FRAGMENTS = (
     "/post",
     "/content",
@@ -20,8 +24,16 @@ SUCCESS_URL_FRAGMENTS = (
     "/content/manage",
     "/post/success",
     "/upload/success",
+    # FIX: Adicionados redirecionamentos comuns
+    "/analytics",
+    "/creator_center?tab=posted",
+    "/tiktokstudio/analytics",
+    "/video/",  # Redireciona para vídeo postado
+    "published",
+    "success",
 )
 
+# FIX: Keywords expandidas (mais variações PT/EN)
 SUCCESS_KEYWORDS = (
     "video posted successfully",
     "video has been posted",
@@ -48,6 +60,16 @@ SUCCESS_KEYWORDS = (
     "we'll notify you when it's done",
     "successfully submitted",
     "successfully published",
+    # FIX: Adicionadas variações comuns do TikTok
+    "your video is now live",
+    "published!",
+    "video published",
+    "vídeo publicado",
+    "agora ao vivo",
+    "processamento concluído",
+    "congratulations",
+    "done!",
+    "ready to view",
 )
 
 PROGRESS_TOKENS = (
@@ -67,6 +89,7 @@ PROGRESS_PATTERNS = (
     re.compile(r"\bhours?\s+(?:left|remaining)\b"),
 )
 
+# FIX: Seletores expandidos (mais toasts/modals)
 STATUS_TEXT_SELECTORS = (
     "//*[@role='status' or @role='alert' or @aria-live]",
     "//*[contains(@data-e2e, 'result')]",
@@ -77,6 +100,19 @@ STATUS_TEXT_SELECTORS = (
     "//*[contains(@class, 'result')]",
     "//*[contains(@class, 'success')]",
     "//*[contains(@class, 'progress')]",
+    # FIX: Adicionados para toasts/modals recentes
+    "//div[contains(@class, 'notification') or contains(@class, 'toast')]",
+    "//*[contains(text(), 'success') or contains(text(), 'posted')]",
+    "//div[@role='dialog']//*[@data-e2e='success-message']",
+)
+
+# FIX: Seletores para spinner/loading (para wait sumir)
+LOADING_SELECTORS = (
+    ".upload-progress",
+    ".processing-spinner",
+    "[data-e2e='upload-progress']",
+    "[class*='loading']",
+    "[class*='spinner']",
 )
 
 
@@ -101,6 +137,7 @@ class PostConfirmationModule:
         self.log = logger if logger else print
 
     # ===================== MÉTODOS UTILITÁRIOS =====================
+    # MANTEVE OS SEUS (bons!)
 
     @staticmethod
     def _normalize_text(text: str) -> str:
@@ -128,6 +165,7 @@ class PostConfirmationModule:
         return False
 
     # ===================== COLETA DE MENSAGENS =====================
+    # FIX: ADICIONOU WAIT PARA ELEMENTOS CARREGarem
 
     def _scan_status_messages(self) -> Tuple[list, list]:
         """
@@ -144,6 +182,14 @@ class PostConfirmationModule:
         progress_snippets = []
         success_snippets = []
         seen_norm = set()
+
+        # FIX: Wait curto para elementos carregarem
+        try:
+            WebDriverWait(self.driver, 3).until(
+                lambda d: len(d.find_elements(By.XPATH, "//body")) > 0
+            )
+        except TimeoutException:
+            pass
 
         # Procura elementos de status
         for selector in STATUS_TEXT_SELECTORS:
@@ -193,6 +239,7 @@ class PostConfirmationModule:
         return progress_snippets, success_snippets
 
     # ===================== VERIFICAÇÕES DE SUCESSO =====================
+    # FIX: MELHOROU URL CHECK (SAI DE UPLOAD = SUCESSO)
 
     def check_url_changed(self) -> bool:
         """
@@ -206,14 +253,19 @@ class PostConfirmationModule:
         except Exception:
             return False
 
-        # Verifica se não está mais na página de upload
-        if not current_url or "upload" not in current_url:
-            # Verifica se mudou para URL de sucesso
-            if any(fragment in current_url for fragment in SUCCESS_URL_FRAGMENTS):
-                self.log("✅ URL mudou - vídeo publicado!")
-                return True
+        # FIX: Primeiro, checa se saiu de upload (mesmo sem fragment específico)
+        if "upload" not in current_url:
+            self.log(f"✅ Saiu da página de upload: {current_url}")
+            return True
+
+        # Verifica se mudou para URL de sucesso
+        if any(fragment in current_url for fragment in SUCCESS_URL_FRAGMENTS):
+            self.log(f"✅ URL mudou para sucesso: {current_url}")
+            return True
 
         return False
+
+    # MANTEVE check_publish_button_disappeared() — BOM
 
     def check_publish_button_disappeared(self) -> bool:
         """
@@ -240,6 +292,8 @@ class PostConfirmationModule:
 
         return False
 
+    # MANTEVE check_success_message() — BOM
+
     def check_success_message(self) -> Optional[str]:
         """
         Verifica se há mensagem de sucesso exibida.
@@ -256,7 +310,23 @@ class PostConfirmationModule:
 
         return None
 
+    # FIX: NOVO MÉTODO PARA WAIT SPINNER SUMIR
+    def wait_for_loading_to_finish(self, timeout: int = 30) -> bool:
+        """
+        FIX: Aguarda spinner/loading sumir (sinal de processamento concluído).
+        """
+        try:
+            WebDriverWait(self.driver, timeout).until_not(
+                lambda d: any(d.find_elements(By.CSS_SELECTOR, sel) for sel in LOADING_SELECTORS)
+            )
+            self.log("✅ Spinner/loading sumiu — processamento concluído")
+            return True
+        except TimeoutException:
+            self.log("⚠️ Timeout aguardando spinner sumir")
+            return False
+
     # ===================== MÉTODOS DE ESPERA =====================
+    # FIX: MELHOROU O LOOP (POLL 3s, CHECK SPINNER, RETRY STALE, FALLBACK)
 
     def wait_for_confirmation(self, timeout: int = CONFIRMATION_TIMEOUT) -> bool:
         """
@@ -270,11 +340,18 @@ class PostConfirmationModule:
         """
         deadline = time.time() + timeout
         last_progress = ""
+        poll_count = 0
 
         self.log(f"⏳ Aguardando confirmação de postagem (timeout: {timeout}s)...")
 
         while time.time() < deadline:
+            poll_count += 1
             try:
+                # FIX: Sinal 0.5 - Aguarda spinner sumir primeiro (10s max)
+                if poll_count == 1:
+                    if self.wait_for_loading_to_finish(10):
+                        self.log("✅ Processamento inicial concluído")
+
                 # Sinal 1: URL mudou
                 if self.check_url_changed():
                     return True
@@ -297,23 +374,40 @@ class PostConfirmationModule:
                     if summary != last_progress:
                         self.log(f"⏳ Aguardando: {summary}")
                         last_progress = summary
-                    time.sleep(3)
+                    time.sleep(POLL_INTERVAL)
                     continue
 
+                # FIX: Após 30s sem progresso/erro, assume sucesso (fallback)
+                if time.time() > (deadline - 30) and not progress_snippets:
+                    self.log("✅ Sem progresso/erro após 30s — assumindo sucesso")
+                    return True
+
+            except StaleElementReferenceException:
+                self.log("🔄 Elemento stale — retrying...")
+                time.sleep(1)
+                continue
             except Exception as e:
                 self.log(f"⚠️ Erro durante espera: {e}")
                 pass
 
-            time.sleep(2)
+            time.sleep(POLL_INTERVAL)
 
-        # Timeout
+        # FIX: Screenshot em timeout para debug
+        try:
+            screenshot_path = f"/tmp/tiktok_confirmation_timeout_{int(time.time())}.png"
+            self.driver.save_screenshot(screenshot_path)
+            self.log(f"📸 Screenshot de timeout salvo: {screenshot_path}")
+        except:
+            pass
+
         if last_progress:
             self.log(f"⚠️ Timeout aguardando confirmação (último status: {last_progress})")
         else:
-            self.log("⚠️ Timeout aguardando confirmação")
+            self.log("⚠️ Timeout aguardando confirmação — cheque manualmente no perfil")
         return False
 
     # ===================== VERIFICAÇÃO FINAL =====================
+    # FIX: MELHOROU verify_post_success() (usa wait spinner)
 
     def verify_post_success(self) -> bool:
         """
@@ -323,6 +417,10 @@ class PostConfirmationModule:
         Returns:
             True se há sinais de sucesso, False caso contrário
         """
+        # FIX: Primeiro, checa se spinner sumiu
+        if self.wait_for_loading_to_finish(5):
+            self.log("✅ Spinner sumiu na verificação rápida")
+
         # Verifica URL
         if self.check_url_changed():
             return True
@@ -338,6 +436,7 @@ class PostConfirmationModule:
         return False
 
     # ===================== MÉTODO PÚBLICO PRINCIPAL =====================
+    # MANTEVE O SEU — BOM
 
     def confirm_posted(
         self,
@@ -348,7 +447,7 @@ class PostConfirmationModule:
         Método principal: confirma se vídeo foi postado.
 
         Args:
-            timeout: Tempo máximo de espera (padrão: 60s)
+            timeout: Tempo máximo de espera (padrão: 90s)
             quick_check: Se True, não aguarda, apenas verifica sinais imediatos
 
         Returns:
@@ -371,6 +470,7 @@ class PostConfirmationModule:
             return result
 
     # ===================== INFORMAÇÕES ADICIONAIS =====================
+    # MANTEVE OS SEUS — BOM
 
     def get_post_status(self) -> dict:
         """

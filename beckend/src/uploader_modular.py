@@ -9,6 +9,7 @@ MUDANÇAS:
 - Separação clara de responsabilidades
 """
 import os
+import time
 from typing import Optional
 
 # Importa módulos especializados
@@ -230,6 +231,10 @@ class TikTokUploader:
                 if self.click_publish():
                     self.log("✅ Segundo clique em publicar executado")
                     self.handle_confirmation_dialog()
+
+            # NOVO: Wait curto para resultado final (5s) — cobre delays do TikTok
+            self.log("⏳ Aguardando confirmação final do TikTok...")
+            time.sleep(5)  # Adicione isso aqui (import time no topo se não tiver)
 
             # MÓDULO 5: Confirmação de Postagem
             self.log("🔹 Etapa 5/7: Confirmação de postagem")
