@@ -126,7 +126,7 @@ _install_python_resiliente() {
 
     print_info "Detectado: codename=${CODENAME:-desconhecido} arch=$ARCH"
 
-    local _install_via_apt() {
+    _install_via_apt() {
         local ver="$1"
         print_info "Tentando instalar Python ${ver} via APT..."
         sudo apt-get update -qq
@@ -134,7 +134,7 @@ _install_python_resiliente() {
         return 1
     }
 
-    local _ensure_deadsnakes() {
+    _ensure_deadsnakes() {
         if ! grep -Rq "ppa.launchpad.net/deadsnakes/ppa" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
             print_info "Adicionando PPA deadsnakes..."
             sudo apt-get update -qq
@@ -193,6 +193,10 @@ _install_python_resiliente() {
     fi
 
     print_success "Python selecionado para venv: $($PYBIN --version 2>/dev/null)"
+
+    # Limpa funções auxiliares para evitar efeitos colaterais
+    unset -f _install_via_apt >/dev/null 2>&1 || true
+    unset -f _ensure_deadsnakes >/dev/null 2>&1 || true
 }
 
 # ════════════════════════════════════════════════════════════════════════════
