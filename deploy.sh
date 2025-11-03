@@ -53,6 +53,18 @@ SKIP_FE=false
 SKIP_NGINX=false
 DEV_MODE=false
 
+# Detecta distribuição (Ubuntu vs Debian)
+OS_ID=$(source /etc/os-release && echo "${ID}")
+OS_ID_LIKE=$(source /etc/os-release && echo "${ID_LIKE}")
+IS_UBUNTU=false
+IS_DEBIAN=false
+if [[ "${OS_ID}" == "ubuntu" || "${OS_ID_LIKE}" == *"ubuntu"* ]]; then
+    IS_UBUNTU=true
+fi
+if [[ "${OS_ID}" == "debian" || "${OS_ID_LIKE}" == *"debian"* ]]; then
+    IS_DEBIAN=true
+fi
+
 # ════════════════════════════════════════════════════════════════════════════
 # FUNÇÕES HELPER
 # ════════════════════════════════════════════════════════════════════════════
@@ -236,12 +248,20 @@ check_dependencies() {
     else
         print_warning "Python 3.11 não encontrado. Instalando..."
         update_apt_if_needed
-        sudo apt install -y software-properties-common
-        sudo add-apt-repository ppa:deadsnakes/ppa -y
+        if [ "$IS_UBUNTU" = true ]; then
+            sudo apt install -y software-properties-common
+            sudo add-apt-repository -y ppa:deadsnakes/ppa
+        else
+            sudo apt install -y software-properties-common || true
+        fi
         sudo apt update -qq
-        sudo apt install -y python3.11 python3.11-venv python3.11-dev python3-pip
-        python_version=$(python3.11 --version | cut -d ' ' -f2)
-        print_success "Python 3.11 instalado: $python_version"
+        if sudo apt install -y python3.11 python3.11-venv python3.11-dev python3-pip; then
+            python_version=$(python3.11 --version | cut -d ' ' -f2)
+            print_success "Python 3.11 instalado: $python_version"
+        else
+            print_error "Não foi possível instalar Python 3.11 automaticamente. Verifique repositórios compatíveis com sua distribuição."
+            exit 1
+        fi
     fi
 
     # Garante que python3 aponta para 3.11
@@ -365,12 +385,13 @@ check_dependencies() {
         update_apt_if_needed
         wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add - >/dev/null 2>&1
 
-        if [ ! -f /etc/apt/sources.list.d/google-chrome.list ]; then
-            print_info "Adicionando repositório do Google Chrome"
-            sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list'
-        else
-            print_info "Repositório do Google Chrome já configurado"
-        fi
+        local chrome_list="/etc/apt/sources.list.d/google-chrome.list"
+        print_info "Configurando repositório do Google Chrome"
+        sudo tee "$chrome_list" >/dev/null <<'EOF'
+### THIS FILE IS AUTOMATICALLY CONFIGURED ###
+# You may comment out this entry, but any other modifications may be lost.
+deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main
+EOF
 
         sudo apt update -qq
         sudo apt install -y google-chrome-stable
