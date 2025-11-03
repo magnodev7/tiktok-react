@@ -227,32 +227,32 @@ check_dependencies() {
     fi
 
     # ═══════════════════════════════════════════════════════════════
-    # PYTHON 3.8+
+    # PYTHON 3.11
     # ═══════════════════════════════════════════════════════════════
-    print_step "Verificando Python 3..."
-    if command -v python3 &> /dev/null; then
-        local python_version=$(python3 --version | cut -d ' ' -f2)
-        local python_major=$(echo $python_version | cut -d'.' -f1)
-        local python_minor=$(echo $python_version | cut -d'.' -f2)
-
-        # Verificar se é Python 3.8 ou superior
-        if [ "$python_major" -ge 3 ] && [ "$python_minor" -ge 8 ]; then
-            print_success "Python 3 instalado: $python_version (OK)"
-        else
-            print_warning "Python $python_version é muito antigo (necessário 3.8+)"
-            print_info "Instalando Python 3.8+..."
-            update_apt_if_needed
-            sudo apt install -y python3 python3-dev
-            python_version=$(python3 --version | cut -d ' ' -f2)
-            print_success "Python atualizado para: $python_version"
-        fi
+    print_step "Verificando Python 3.11..."
+    if command -v python3.11 &> /dev/null; then
+        local python_version=$(python3.11 --version | cut -d ' ' -f2)
+        print_success "Python 3.11 instalado: $python_version"
     else
-        print_warning "Python 3 não encontrado. Instalando..."
+        print_warning "Python 3.11 não encontrado. Instalando..."
         update_apt_if_needed
-        sudo apt install -y python3 python3-dev
-        local python_version=$(python3 --version | cut -d ' ' -f2)
-        print_success "Python 3 instalado: $python_version"
+        sudo apt install -y software-properties-common
+        sudo add-apt-repository ppa:deadsnakes/ppa -y
+        sudo apt update -qq
+        sudo apt install -y python3.11 python3.11-venv python3.11-dev python3-pip
+        python_version=$(python3.11 --version | cut -d ' ' -f2)
+        print_success "Python 3.11 instalado: $python_version"
     fi
+
+    # Garante que python3 aponta para 3.11
+    local current_python=$(python3 --version 2>/dev/null | cut -d ' ' -f2)
+    if [[ "$current_python" != 3.11* ]]; then
+        print_info "Atualizando alternativas para apontar python3 → python3.11"
+        sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+        sudo update-alternatives --set python3 /usr/bin/python3.11
+        current_python=$(python3 --version 2>/dev/null | cut -d ' ' -f2)
+    fi
+    print_success "python3 em uso: $current_python"
 
     # ═══════════════════════════════════════════════════════════════
     # PIP E VENV
@@ -349,6 +349,38 @@ check_dependencies() {
         sudo apt install -y npm
         local npm_version=$(npm --version)
         print_success "npm instalado: $npm_version"
+    fi
+
+    # ═══════════════════════════════════════════════════════════════
+    # GOOGLE CHROME (para automações Selenium)
+    # ═══════════════════════════════════════════════════════════════
+    print_step "Verificando Google Chrome..."
+    if command -v google-chrome &> /dev/null; then
+        local chrome_version
+        chrome_version=$(google-chrome --version 2>/dev/null || true)
+        print_success "Google Chrome instalado: ${chrome_version:-versão desconhecida}"
+    else
+        print_warning "Google Chrome não encontrado. Instalando..."
+
+        update_apt_if_needed
+        wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add - >/dev/null 2>&1
+
+        if [ ! -f /etc/apt/sources.list.d/google-chrome.list ]; then
+            print_info "Adicionando repositório do Google Chrome"
+            sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list'
+        else
+            print_info "Repositório do Google Chrome já configurado"
+        fi
+
+        sudo apt update -qq
+        sudo apt install -y google-chrome-stable
+
+        if command -v google-chrome &> /dev/null; then
+            chrome_version=$(google-chrome --version 2>/dev/null || true)
+            print_success "Google Chrome instalado: ${chrome_version:-versão desconhecida}"
+        else
+            print_warning "Não foi possível instalar o Google Chrome automaticamente. Instale manualmente e execute o script novamente."
+        fi
     fi
 
     # ═══════════════════════════════════════════════════════════════
