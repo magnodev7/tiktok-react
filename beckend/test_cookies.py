@@ -18,9 +18,9 @@ except ImportError as e:
     sys.exit(1)
 
 # Configurações do teste
-ACCOUNT_NAME = "novadigitalbra"  # Mude aqui se quiser testar outra conta
-VISIBLE = True  # True para ver o navegador (útil para debug); False para headless
-TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"  # Respeita env var se existir
+ACCOUNT_NAME = os.getenv("ACCOUNT_NAME", "novadigitalbra").strip() or "novadigitalbra"
+VISIBLE = os.getenv("VISIBLE", "false").lower() in ("1", "true", "yes", "on")
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
 def main():
     print(f"🧪 Iniciando teste de cookies para conta: @{ACCOUNT_NAME}")
