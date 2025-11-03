@@ -4,7 +4,7 @@ Define o público-alvo (público, privado, restrito etc.) e aplica as configura�
 """
 import time
 from enum import Enum
-from typing import Optional, Callable
+from typing import Optional, Callable, List
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -77,7 +77,7 @@ class AudienceModule:
 
     # ===================== DETECÇÃO DE AUDIÊNCIA ATUAL =====================
 
-    def _get_audience_texts(self, audience_type: AudienceType) -> list[str]:
+    def _get_audience_texts(self, audience_type: AudienceType) -> List[str]:
         """
         Retorna lista de textos possíveis para um tipo de audiência.
 
