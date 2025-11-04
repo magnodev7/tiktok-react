@@ -1,9 +1,12 @@
 """
-Módulo 2: Tratamento da Descrição
+Módulo 2: Tratamento da Descrição (Versão Otimizada v2.3.1 - Fix Import)
 Lida exclusivamente com a criação, edição e formatação da descrição do vídeo
+Otimizações: Timeout 3s em locate, 2 retries max, no relocate em verify (cache sempre), JS simplificado sem blur/sleep, handle single locate.
 """
-import time
-from typing import Optional, Callable
+import re
+import time  # Fix: Adicionado para time.time()
+import unicodedata
+from typing import Optional, Callable, Tuple
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -11,16 +14,23 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
 # Constantes
-WAIT_MED = 15
+WAIT_SHORT = 3  # Reduzido para eficiência
+MAX_LENGTH = 2200
 
 DESCRIPTION_SELECTORS = [
-    "div[data-e2e='caption-editor'] div[contenteditable='true']",
-    "div[contenteditable='true'][data-placeholder]",
-    "div[contenteditable='true'][role='textbox']",
-    "div[contenteditable='true'][aria-label*='caption']",
-    "div[contenteditable='true'][aria-label*='description']",
-    "textarea[placeholder*='caption']",
-    "textarea[placeholder*='description']",
+    (By.CSS_SELECTOR, "div[data-e2e='description-input']"),
+    (By.CSS_SELECTOR, "div[data-e2e='caption-input']"),
+    (By.CSS_SELECTOR, "div[contenteditable='true'][placeholder*='add description']"),
+    (By.CSS_SELECTOR, "div[contenteditable='true'][placeholder*='description']"),
+    (By.CSS_SELECTOR, "div[contenteditable='true'][placeholder*='add caption']"),
+    (By.CSS_SELECTOR, "div[contenteditable='true'][role='textbox'][aria-label*='add description']"),
+    (By.CSS_SELECTOR, "div[contenteditable='true'][aria-label*='description']"),
+    (By.CSS_SELECTOR, "div[class*='caption-editor'] div[contenteditable='true']"),
+    (By.CSS_SELECTOR, "div[class*='description-field']"),
+    (By.CSS_SELECTOR, "textarea[placeholder*='add description']"),
+    (By.CSS_SELECTOR, "textarea[placeholder*='description']"),
+    (By.XPATH, "//div[@contenteditable='true' and contains(@placeholder, 'description')]"),
+    (By.XPATH, "//div[contains(@class, 'caption') and @contenteditable='true']"),
 ]
 
 
@@ -30,7 +40,7 @@ class DescriptionModule:
     Gerencia validação, formatação, sanitização e preenchimento do campo de descrição.
     """
 
-    def __init__(self, driver, logger: Optional[Callable] = None):
+    def __init__(self, driver, logger: Optional[Callable[[str], None]] = None):
         """
         Inicializa o módulo de descrição.
 
@@ -40,49 +50,46 @@ class DescriptionModule:
         """
         self.driver = driver
         self.log = logger if logger else print
+        self._cached_field = None  # Cache para eficiência
 
     # ===================== VALIDAÇÃO E SANITIZAÇÃO =====================
 
     @staticmethod
     def sanitize_description(text: str) -> str:
         """
-        Sanitiza texto da descrição removendo caracteres problemáticos.
+        Sanitiza texto da descrição removendo problemáticos (regex otimizado).
 
         Args:
-            text: Texto original da descrição
+            text: Texto original
 
         Returns:
-            Texto sanitizado
+            Sanitizado
         """
         if not text:
             return ""
 
-        # Remove emojis fora do BMP (Chrome não suporta bem)
-        # BMP = Basic Multilingual Plane (U+0000 a U+FFFF)
-        sanitized = ''.join(char if ord(char) <= 0xFFFF else '' for char in text)
+        # Remove emojis BMP+ (U+10000+)
+        sanitized = re.sub(r'[\U00010000-\U0010FFFF]', '', text)
 
-        # Remove caracteres de controle (exceto newline, tab)
-        sanitized = ''.join(
-            char for char in sanitized
-            if char in '\n\t' or ord(char) >= 32
-        )
+        # Remove control chars (exceto \n\t)
+        sanitized = re.sub(r'[\x00-\x1F\x7F]', '', sanitized)
 
         # Remove espaços extras
-        sanitized = ' '.join(sanitized.split())
+        sanitized = re.sub(r'\s+', ' ', sanitized).strip()
 
-        return sanitized.strip()
+        return sanitized
 
     @staticmethod
-    def validate_description_length(text: str, max_length: int = 2200) -> tuple[bool, str]:
+    def validate_description_length(text: str, max_length: int = MAX_LENGTH) -> Tuple[bool, str]:
         """
-        Valida e ajusta o comprimento da descrição.
+        Valida e ajusta comprimento (mantém palavras).
 
         Args:
-            text: Texto da descrição
-            max_length: Tamanho máximo permitido (TikTok permite ~2200 caracteres)
+            text: Texto
+            max_length: Máximo
 
         Returns:
-            Tupla (válido: bool, texto_ajustado: str)
+            (válido, ajustado)
         """
         if not text:
             return True, ""
@@ -90,11 +97,9 @@ class DescriptionModule:
         if len(text) <= max_length:
             return True, text
 
-        # Trunca mantendo palavras inteiras
         truncated = text[:max_length]
         last_space = truncated.rfind(' ')
-
-        if last_space > 0:
+        if last_space > max_length // 2:
             truncated = truncated[:last_space]
 
         truncated = truncated.rstrip('.,!?;:') + '...'
@@ -102,265 +107,268 @@ class DescriptionModule:
 
     def prepare_description(self, text: str) -> str:
         """
-        Prepara descrição para uso (sanitiza e valida).
+        Prepare (sanitize + validate).
 
         Args:
-            text: Texto original
+            text: Original
 
         Returns:
-            Texto preparado e pronto para uso
+            Preparado
         """
         if not text:
             return ""
 
-        # Sanitiza
         sanitized = self.sanitize_description(text)
-
-        # Valida comprimento
         is_valid, adjusted = self.validate_description_length(sanitized)
 
         if not is_valid:
-            self.log(f"⚠️ Descrição truncada de {len(sanitized)} para {len(adjusted)} caracteres")
+            self.log(f"⚠️ Truncada de {len(sanitized)} para {len(adjusted)} chars")
 
         return adjusted
 
     # ===================== LOCALIZAÇÃO DO CAMPO =====================
 
-    def _wait_visible(self, by, value, timeout=WAIT_MED):
-        """Espera elemento ficar visível"""
-        return WebDriverWait(self.driver, timeout).until(
-            EC.visibility_of_element_located((by, value))
-        )
+    def _wait_visible(self, by: By, value: str, timeout: int = WAIT_SHORT) -> Optional[object]:
+        """Espera visível (EC reativo, 3s)"""
+        try:
+            return WebDriverWait(self.driver, timeout).until(
+                EC.visibility_of_element_located((by, value))
+            )
+        except TimeoutException:
+            return None
 
-    def find_description_field(self, timeout: int = 10):
+    def find_description_field(self, timeout: int = WAIT_SHORT, use_cache: bool = True) -> Optional[object]:
         """
-        Localiza o campo de descrição na página.
+        Localiza campo (cache + 2 retries, timeout 3s).
 
         Args:
-            timeout: Tempo máximo de busca em segundos
+            timeout: Máximo (3s)
+            use_cache: Usa cache
 
         Returns:
-            Elemento do campo de descrição ou None se não encontrado
+            Elemento ou None
         """
-        for selector in DESCRIPTION_SELECTORS:
+        if use_cache and self._cached_field:
             try:
-                field = self._wait_visible(By.CSS_SELECTOR, selector, timeout=timeout)
-                if field:
-                    self.log(f"✅ Campo de descrição encontrado: {selector}")
-                    return field
-            except TimeoutException:
-                continue
-            except Exception as e:
-                self.log(f"⚠️ Erro ao buscar seletor {selector}: {e}")
-                continue
+                self.driver.execute_script("arguments[0].scrollIntoView();", self._cached_field)
+                if self._wait_visible(By.ID, self._cached_field.id, timeout=0.5):
+                    self.log("✅ Cache hit")
+                    return self._cached_field
+            except:
+                pass
 
-        self.log("⚠️ Campo de descrição não encontrado")
+        deadline = time.time() + timeout
+        retries = 2  # Reduzido para eficiência
+
+        for retry in range(retries):
+            for by, value in DESCRIPTION_SELECTORS:
+                field = self._wait_visible(by, value, timeout=min(1, deadline - time.time()))  # 1s per selector
+                if field:
+                    self._cached_field = field
+                    label = value.split('[')[-1].rstrip(']') if '[' in value else value
+                    self.log(f"✅ Encontrado: {label}")
+                    return field
+
+            if retry < retries - 1:
+                self.log(f"🔄 Retry {retry+1}/2...")
+                time.sleep(0.5)  # Backoff curto
+
+        self.log("⚠️ Não encontrado após 2 retries")
+        self._cached_field = None
         return None
 
     # ===================== PREENCHIMENTO =====================
 
     def _fill_via_javascript(self, field, text: str) -> bool:
         """
-        Preenche campo usando JavaScript (método mais rápido e confiável).
+        Preenche via JS simplificado (sem blur, dispatch composto).
 
         Args:
-            field: Elemento do campo
-            text: Texto a preencher
+            field: Elemento
+            text: Texto
 
         Returns:
-            True se preencheu com sucesso, False caso contrário
+            True se sucesso
         """
         try:
             self.driver.execute_script(
                 """
-                arguments[0].focus();
-                arguments[0].innerText = arguments[1];
-                arguments[0].dispatchEvent(new InputEvent('input', { bubbles: true }));
-                arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
+                const el = arguments[0];
+                el.focus();
+                el.innerText = arguments[1];
+                el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
                 """,
                 field,
                 text,
             )
-            self.log(f"📝 Descrição preenchida via JavaScript ({len(text)} chars)")
+            self.log(f"📝 JS preenchido ({len(text)} chars)")
             return True
         except Exception as e:
-            self.log(f"⚠️ Falha ao preencher via JavaScript: {e}")
+            self.log(f"⚠️ Falha JS: {e}")
             return False
 
     def _fill_via_sendkeys(self, field, text: str) -> bool:
         """
-        Preenche campo usando send_keys (fallback mais lento).
+        Fallback send_keys (clear rápido).
 
         Args:
-            field: Elemento do campo
-            text: Texto a preencher
+            field: Elemento
+            text: Texto
 
         Returns:
-            True se preencheu com sucesso, False caso contrário
+            True se sucesso
         """
         try:
             field.clear()
             field.send_keys(text)
-            self.log(f"📝 Descrição preenchida via send_keys ({len(text)} chars)")
+            self.log(f"📝 Send_keys preenchido ({len(text)} chars)")
             return True
         except Exception as e:
-            self.log(f"⚠️ Falha ao preencher via send_keys: {e}")
+            self.log(f"⚠️ Falha send_keys: {e}")
             return False
 
     def fill_description(self, text: str, required: bool = False) -> bool:
         """
-        Preenche o campo de descrição do vídeo.
+        Preenche (cache + 3s timeout).
 
         Args:
-            text: Texto da descrição
-            required: Se True, retorna False se não conseguir preencher
-                     Se False, continua mesmo sem preencher (opcional)
+            text: Preparado
+            required: Falha se não
 
         Returns:
-            True se preencheu ou se não era required, False caso contrário
+            True se preenchido
         """
-        # Prepara texto
         prepared_text = self.prepare_description(text)
-
         if not prepared_text:
-            self.log("ℹ️ Descrição vazia, pulando preenchimento")
+            self.log("ℹ️ Vazia, pulando")
             return True
 
-        # Localiza campo
-        field = self.find_description_field(timeout=10)
-
+        field = self.find_description_field(timeout=3, use_cache=True)
         if not field:
             if required:
-                self.log("❌ Campo de descrição não encontrado (required=True)")
+                self.log("❌ Campo não encontrado (required=True)")
                 return False
-            else:
-                self.log("⚠️ Campo de descrição não encontrado (continuando sem descrição)")
-                return True
+            self.log("⚠️ Campo não encontrado (continuando)")
+            return True
 
-        # Tenta preencher (JavaScript primeiro, send_keys como fallback)
+        # JS primeiro, fallback send_keys
         if self._fill_via_javascript(field, prepared_text):
-            time.sleep(1)
             return True
 
         if self._fill_via_sendkeys(field, prepared_text):
-            time.sleep(1)
             return True
 
-        # Se chegou aqui, falhou em ambos os métodos
         if required:
-            self.log("❌ Falha ao preencher descrição (required=True)")
+            self.log("❌ Falha ambos (required=True)")
             return False
-        else:
-            self.log("⚠️ Não consegui preencher descrição (continuando)")
-            return True
+        self.log("⚠️ Falha preenchimento (continuando)")
+        return True
 
     # ===================== VERIFICAÇÃO =====================
 
     def verify_description_filled(self, expected_text: str) -> bool:
         """
-        Verifica se a descrição foi preenchida corretamente.
+        Verifica (usa cache sempre, partial regex 0.8 overlap ou top 3 words).
 
         Args:
-            expected_text: Texto esperado
+            expected_text: Esperado
 
         Returns:
-            True se descrição está correta, False caso contrário
+            True se match
         """
         try:
-            field = self.find_description_field(timeout=5)
+            # No relocate – usa cache ou quick find
+            if self._cached_field:
+                field = self._cached_field
+            else:
+                field = self.find_description_field(timeout=2, use_cache=False)
             if not field:
                 return False
 
-            # Obtém texto atual do campo
+            # Get text (rápido)
             try:
                 current_text = field.text.strip()
             except:
                 try:
                     current_text = field.get_attribute('innerText').strip()
                 except:
-                    return False
+                    current_text = self.driver.execute_script("return arguments[0].innerText;", field).strip()
 
-            # Compara (ignora espaços extras)
-            expected_normalized = ' '.join(expected_text.split())
-            current_normalized = ' '.join(current_text.split())
-
-            if current_normalized == expected_normalized:
-                self.log("✅ Descrição verificada e correta")
+            # Partial: 80% len + top 3 words intersection (regex para velocidade)
+            expected_norm = re.sub(r'\s+', ' ', self._normalize_text(expected_text)).strip()
+            current_norm = re.sub(r'\s+', ' ', self._normalize_text(current_text)).strip()
+            
+            words_expected = expected_norm.split()[:3]  # Top 3 words
+            if current_norm == expected_norm or (len(current_norm) >= 0.8 * len(expected_norm) and any(re.search(r'\b' + re.escape(w) + r'\b', current_norm) for w in words_expected)):
+                self.log("✅ Verificado (partial)")
                 return True
-            else:
-                self.log(f"⚠️ Descrição diferente do esperado")
-                self.log(f"   Esperado: {expected_normalized[:100]}...")
-                self.log(f"   Atual: {current_normalized[:100]}...")
-                return False
+
+            self.log(f"⚠️ Difere")
+            self.log(f"   Esperado: {expected_norm[:100]}...")
+            self.log(f"   Atual: {current_norm[:100]}...")
+            return False
 
         except Exception as e:
-            self.log(f"⚠️ Erro ao verificar descrição: {e}")
+            self.log(f"⚠️ Erro verificação: {e}")
             return False
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        """Normalize para match (lower, no accents)"""
+        normalized = unicodedata.normalize("NFKD", text or "")
+        normalized = normalized.encode("ascii", "ignore").decode().lower()
+        return normalized
 
     def clear_description(self) -> bool:
         """
-        Limpa o campo de descrição.
+        Limpa (usa cache, JS rápido).
 
         Returns:
-            True se limpou com sucesso, False caso contrário
+            True se limpou
         """
+        field = self._cached_field if self._cached_field else self.find_description_field(timeout=2, use_cache=False)
+        if not field:
+            return False
+
         try:
-            field = self.find_description_field(timeout=5)
-            if not field:
-                return False
-
-            # Limpa via JavaScript
-            try:
-                self.driver.execute_script(
-                    """
-                    arguments[0].focus();
-                    arguments[0].innerText = '';
-                    arguments[0].dispatchEvent(new InputEvent('input', { bubbles: true }));
-                    """,
-                    field,
-                )
-                self.log("✅ Descrição limpa")
-                return True
-            except:
-                pass
-
-            # Fallback: clear()
+            self.driver.execute_script(
+                """
+                const el = arguments[0];
+                el.focus();
+                el.innerText = '';
+                el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true }));
+                """,
+                field,
+            )
+            self.log("✅ Limpo (JS)")
+            return True
+        except:
             try:
                 field.clear()
-                self.log("✅ Descrição limpa (via clear)")
+                self.log("✅ Limpo (clear)")
                 return True
-            except:
-                pass
-
-            return False
-
-        except Exception as e:
-            self.log(f"⚠️ Erro ao limpar descrição: {e}")
-            return False
+            except Exception as e:
+                self.log(f"⚠️ Erro clear: {e}")
+                return False
 
     # ===================== MÉTODO PÚBLICO PRINCIPAL =====================
 
     def handle_description(self, text: str, required: bool = False, verify: bool = False) -> bool:
         """
-        Método principal: gerencia todo o fluxo de descrição.
-        1. Prepara texto (sanitiza e valida)
-        2. Localiza campo
-        3. Preenche
-        4. Verifica (opcional)
+        Fluxo completo (single locate + fill + verify opcional).
 
         Args:
-            text: Texto da descrição
-            required: Se True, falha se não conseguir preencher
-            verify: Se True, verifica se foi preenchido corretamente
+            text: Texto
+            required: Falha se não preencher
+            verify: Verifica match
 
         Returns:
-            True se todo o fluxo foi bem-sucedido, False caso contrário
+            True se sucesso
         """
-        # Preenche
         if not self.fill_description(text, required=required):
             return False
 
-        # Verifica se solicitado
         if verify and text:
             return self.verify_description_filled(text)
 

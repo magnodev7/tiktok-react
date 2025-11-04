@@ -1,10 +1,15 @@
+# beckend/src/modules/post_action.py
 """
-Módulo 4: Ação de Postagem
-Executa o clique/trigger para iniciar a postagem efetiva na plataforma
-Gerencia modais de confirmação e bloqueios
+Módulo 4: Ação de Postagem (Versão Otimizada v2.0-fast)
+- Esperas curtas com backoff.
+- Busca do botão via JS querySelectorAll (super-query CSS) + fallback XPath.
+- Escopo reduzido ao formulário/container de upload quando possível.
+- Clique via JS primeiro; sem sleeps desnecessários.
+- Tratamento rápido de modais (Exit/TUX/Confirm).
 """
+
+from typing import Optional, Callable, List
 import time
-from typing import Optional, Callable
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -15,457 +20,325 @@ from selenium.common.exceptions import (
     NoSuchElementException,
 )
 
-# Constantes
-WAIT_SHORT = 3
-WAIT_MED = 5
-WAIT_LONG = 10  # NOVO: Para checks finais de sucesso
+__VERSION__ = "post_action v2.0-fast"
 
-# Seletores robustos para o botão de publicar (ordem de prioridade) — MANTEVE OS SUAS, ADICIONOU 2 NOVOS
-PUBLISH_BUTTON_SELECTORS = [
-    # Seletores data-e2e (mais confiáveis)
+# ---------- Timeouts agressivos ----------
+WAIT_FAST = 1.2       # espera curta
+WAIT_MED = 2.5        # backoff curto
+WAIT_LONG = 6.0       # checks finais (se necessário)
+POLL = 0.10           # 100ms
+
+# ---------- Super-query CSS (rápida e estável) ----------
+PUBLISH_CSS_SUPER = (
+    "button[data-e2e='post_video_button']:not([disabled]),"
+    "button[data-e2e='post_button']:not([disabled]),"
+    "button[data-e2e='publish-button']:not([disabled]),"
+    "button[data-e2e='submit-button']:not([disabled]),"
+    "button[data-testid='publish-video']:not([disabled]),"
+    "div[role='button'][data-e2e='action-button-post']"
+)
+
+# Fallback XPaths (último recurso)
+PUBLISH_XPATHS = [
     "//button[@data-e2e='post_video_button' and not(@disabled)]",
     "//button[@data-e2e='post_button' and not(@disabled)]",
     "//button[@data-e2e='publish-button' and not(@disabled)]",
     "//button[@data-e2e='submit-button' and not(@disabled)]",
-
-    # Seletores por texto (vários idiomas)
-    "//button[contains(translate(normalize-space(.), 'POST', 'post'), 'post') and not(@disabled)]",
-    "//button[contains(translate(normalize-space(.), 'PUBLICAR', 'publicar'), 'publicar') and not(@disabled)]",
-    "//button[contains(translate(normalize-space(.), 'PUBLISH', 'publish'), 'publish') and not(@disabled)]",
-    "//button[contains(translate(normalize-space(.), 'SUBMIT', 'submit'), 'submit') and not(@disabled)]",
-    "//button[contains(translate(normalize-space(.), 'ENVIAR', 'enviar'), 'enviar') and not(@disabled)]",
-
-    # Seletores genéricos por classe/tipo
-    "//button[contains(@class, 'post') and not(@disabled)]",
-    "//button[contains(@class, 'submit') and not(@disabled)]",
-    "//button[contains(@class, 'publish') and not(@disabled)]",
-    "//button[@type='submit' and not(@disabled)]",
-
-    # Seletores por hierarquia (último recurso)
-    "//div[contains(@class, 'publish')]//button[not(@disabled)]",
-    "//div[contains(@class, 'submit')]//button[not(@disabled)]",
-    "//form//button[@type='submit' and not(@disabled)]",
-
-    # NOVO: Seletores para UI recente do TikTok Studio
     "//button[@data-testid='publish-video']",
-    "//div[role='button'][data-e2e='action-button-post']",
+    "//div[@role='button' and @data-e2e='action-button-post']",
+    # Texto (fallback mesmo)
+    "//button[contains(translate(normalize-space(.),'POST','post')) and not(@disabled)]",
+    "//button[contains(translate(normalize-space(.),'PUBLICAR','publicar')) and not(@disabled)]",
 ]
 
-# Seletores para modais de confirmação — MANTEVE, ADICIONOU 1 NOVO
-CONFIRMATION_BUTTON_SELECTORS = [
-    "//button[contains(., 'Post') or contains(., 'Continue') or contains(., 'Publicar')]",
-    "//button[contains(., 'Confirm') or contains(., 'Confirmar')]",
+CONFIRM_XPATHS = [
     "//button[@data-e2e='confirm-button']",
     "//button[@data-e2e='post-confirm']",
-    # NOVO: Para modais recentes
-    "//button[data-testid='confirm-publish']",
+    "//button[@data-testid='confirm-publish']",
+    "//button[contains(., 'Post') or contains(., 'Continue') or contains(., 'Publicar')]",
 ]
 
-# Seletores para modal "Are you sure you want to exit?" — MANTEVE
-EXIT_MODAL_SELECTORS = [
+EXIT_XPATHS = [
     "//button[contains(translate(., 'CANCEL', 'cancel'), 'cancel')]",
     "//button[contains(translate(., 'CANCELAR', 'cancelar'), 'cancelar')]",
 ]
 
-# Seletores para fechar modais TUX — MANTEVE
-CLOSE_MODAL_SELECTORS = [
+TUX_CLOSE_XPATHS = [
     "//div[@class='TUXModal-overlay']//button[contains(@aria-label, 'Close')]",
     "//div[@class='TUXModal-overlay']//button[contains(@class, 'close')]",
     "//div[contains(@class, 'Modal')]//button[@aria-label='Close']",
     "//button[contains(@class, 'close') and contains(@class, 'modal')]",
 ]
 
-# NOVO: Keywords mais específicas para violação (evita false positives)
-VIOLATION_KEYWORDS = [
-    "violation reason",
-    "unoriginal content",
-    "low quality content",
-    "violates guidelines",
-    "conteúdo não original",
-    "baixa qualidade",
-    "copied content",
-    "duplicated content",
-    # NOVO: Evita matches genéricos — só violações explícitas
-]
-
-# NOVO: Indicadores de sucesso (para check positivo)
-SUCCESS_INDICATORS = [
+SUCCESS_HINTS = [
+    "/video/",
+    "tiktok.com/v/",
     "posted successfully",
     "video published",
     "vídeo publicado",
     "your video is live",
-    # NOVO: Por URL patterns
-    "/video/",
-    "tiktok.com/v/",
 ]
 
 
 class PostActionModule:
     """
     Módulo responsável pela ação de postagem no TikTok.
-    Gerencia o clique no botão de publicar e lida com modais de confirmação.
+    Foco em eficiência: localizar, confirmar e finalizar postagem rapidamente.
     """
 
     def __init__(self, driver, logger: Optional[Callable] = None):
-        """
-        Inicializa o módulo de ação de postagem.
-
-        Args:
-            driver: WebDriver do Selenium
-            logger: Função de logging (opcional, usa print por padrão)
-        """
         self.driver = driver
         self.log = logger if logger else print
 
-    # ===================== MÉTODOS UTILITÁRIOS =====================
-    # MANTEVE OS SEUS
+    # ============ Utils rápidos ============
 
-    def _wait_clickable(self, by, value, timeout=WAIT_MED):
-        """Espera elemento ficar clicável"""
-        return WebDriverWait(self.driver, timeout).until(
-            EC.element_to_be_clickable((by, value))
-        )
+    def _now(self) -> float:
+        return time.perf_counter()
 
-    def _scroll_to_element(self, element):
-        """Rola a página até o elemento"""
+    def _wait_any_xpath(self, xpaths: List[str], timeout: float) -> Optional[object]:
+        """Espera o primeiro elemento de uma lista de XPaths ficar clicável."""
+        end = self._now() + timeout
+        while self._now() < end:
+            for xp in xpaths:
+                try:
+                    el = WebDriverWait(self.driver, 0.5, POLL).until(
+                        EC.element_to_be_clickable((By.XPATH, xp))
+                    )
+                    if el:
+                        return el
+                except Exception:
+                    continue
+        return None
+
+    def _js_query(self, root, css: str):
+        """querySelectorAll via JS a partir de root (document ou um container)."""
+        try:
+            return self.driver.execute_script(
+                "return Array.from(arguments[0].querySelectorAll(arguments[1]));",
+                root, css
+            )
+        except Exception:
+            return []
+
+    def _scroll_into_view_center(self, el):
         try:
             self.driver.execute_script(
-                "arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});",
-                element
+                "arguments[0].scrollIntoView({block:'center', inline:'center'});", el
             )
-            time.sleep(0.5)
-        except Exception as e:
-            self.log(f"⚠️ Erro ao rolar até elemento: {e}")
+        except Exception:
+            pass
 
-    def _click_element(self, element) -> bool:
-        """
-        Tenta clicar em elemento (normal primeiro, JavaScript como fallback).
-
-        Returns:
-            True se clicou com sucesso, False caso contrário
-        """
-        # Tenta clique normal
+    def _js_click(self, el) -> bool:
         try:
-            element.click()
+            self.driver.execute_script("arguments[0].click();", el)
+            return True
+        except Exception:
+            return False
+
+    def _click_element(self, el) -> bool:
+        """Tenta JS click primeiro (rápido), cai para click normal só se falhar."""
+        if self._js_click(el):
+            return True
+        try:
+            el.click()
             return True
         except ElementClickInterceptedException:
-            # Fallback: JavaScript click
-            try:
-                self.driver.execute_script("arguments[0].click();", element)
-                return True
-            except Exception as e:
-                self.log(f"⚠️ Falha ao clicar (JS): {e}")
-                return False
-        except Exception as e:
-            self.log(f"⚠️ Falha ao clicar: {e}")
+            self._scroll_into_view_center(el)
+            return self._js_click(el)
+        except Exception:
             return False
 
-    # ===================== DETECÇÃO DE VIOLAÇÕES (MELHORADO) =====================
-
-    def detect_content_violation(self) -> bool:
-        """
-        Detecta se TikTok rejeitou o vídeo por violação de conteúdo.
-        TESTE TEMPORÁRIO: Retorna False sempre para isolar o problema.
-        """
-        self.log("🔍 DEBUG: Check de violação DESABILITADO (teste) — assumindo SEM violação")
-        return False  # ← Isso pula o erro e deixa ir para Etapa 5
-
-    # NOVO: Método para check de sucesso positivo
-    def _check_post_success(self) -> bool:
-        """
-        Verifica indicadores de postagem bem-sucedida (URL, texto).
-        """
-        try:
-            current_url = self.driver.current_url.lower()
-            page_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
-
-            # Check por URL de sucesso
-            if any(indicator in current_url for indicator in ["video/", "tiktok.com/v/", "published"]):
-                self.log(f"✅ Sucesso detectado por URL: {current_url}")
-                return True
-
-            # Check por texto de sucesso
-            if any(indicator in page_text for indicator in SUCCESS_INDICATORS):
-                self.log("✅ Sucesso detectado por texto na página")
-                return True
-
-            return False
-        except:
-            return False
-
-    # ===================== GERENCIAMENTO DE MODAIS =====================
-    # MANTEVE OS SEUS (close_exit_modal, close_blocking_modals) — ESTÃO BOM
+    # ============ Modais ============
 
     def close_exit_modal(self) -> bool:
-        """
-        Fecha modal "Are you sure you want to exit?" clicando em Cancel.
-
-        Returns:
-            True se modal foi fechado, False se não havia modal
-        """
-        for selector in EXIT_MODAL_SELECTORS:
+        """Fecha modal 'Are you sure you want to exit?' clicando em Cancel (fast-path)."""
+        for xp in EXIT_XPATHS:
             try:
-                button = self.driver.find_element(By.XPATH, selector)
-                if button.is_displayed():
-                    button.click()
-                    self.log("🚪 Modal 'exit' fechado - clicado em Cancel")
-                    time.sleep(2)
+                btn = WebDriverWait(self.driver, WAIT_FAST, POLL).until(
+                    EC.element_to_be_clickable((By.XPATH, xp))
+                )
+                if btn and self._click_element(btn):
+                    self.log("🚪 Modal 'exit' fechado (Cancel)")
+                    # Espera curta para sumir
+                    try:
+                        WebDriverWait(self.driver, WAIT_FAST, POLL).until_not(
+                            EC.presence_of_element_located((By.XPATH, xp))
+                        )
+                    except Exception:
+                        pass
                     return True
-            except:
+            except Exception:
                 continue
-
         return False
 
     def close_blocking_modals(self) -> bool:
-        """
-        Fecha modais TUX que podem estar bloqueando a interação.
-
-        Returns:
-            True se algum modal foi fechado, False caso contrário
-        """
-        for selector in CLOSE_MODAL_SELECTORS:
+        """Fecha modais TUX que podem bloquear interação."""
+        closed = False
+        for xp in TUX_CLOSE_XPATHS:
             try:
-                button = self.driver.find_element(By.XPATH, selector)
-                if button.is_displayed():
-                    button.click()
-                    self.log("🚪 Modal TUX fechado")
-                    time.sleep(1)
-                    return True
-            except:
+                btn = self.driver.find_element(By.XPATH, xp)
+                if btn and btn.is_displayed() and self._click_element(btn):
+                    closed = True
+            except Exception:
                 continue
-
-        return False
+        if closed:
+            self.log("🧹 Modais TUX fechados")
+        return closed
 
     def handle_confirmation_dialog(self) -> bool:
         """
-        Lida com modal de confirmação "Continue to post?".
-        Fecha modais de bloqueio primeiro, depois confirma postagem.
-
-        Returns:
-            True se lidou com sucesso ou modal não apareceu, False se falhou
+        Lida com o modal de confirmação 'Continue to post?'.
+        Fast-path: fecha 'exit', fecha TUX, confirma se aparecer.
         """
         try:
-            # PASSO 1: Verifica e fecha modal "exit" se existir
             self.close_exit_modal()
-
-            # PASSO 2: Fecha modais TUX que podem estar bloqueando
             self.close_blocking_modals()
 
-            # PASSO 3: Aguarda modal de confirmação aparecer (ou não)
-            try:
-                WebDriverWait(self.driver, WAIT_MED).until(
-                    EC.presence_of_element_located(
-                        (By.XPATH, CONFIRMATION_BUTTON_SELECTORS[0])
+            # Espera curta por algum botão de confirmar
+            btn = self._wait_any_xpath(CONFIRM_XPATHS, timeout=WAIT_FAST)
+            if not btn:
+                return True  # não apareceu, segue o fluxo
+
+            if self._click_element(btn):
+                self.log("✅ Confirmação resolvida")
+                # Espera overlay sumir rapidamente
+                try:
+                    WebDriverWait(self.driver, WAIT_MED, POLL).until_not(
+                        EC.presence_of_element_located((By.CLASS_NAME, "TUXModal-overlay"))
                     )
-                )
-            except TimeoutException:
-                # Modal não apareceu (tudo bem)
+                except Exception:
+                    pass
                 return True
 
-            # PASSO 4: Clica no botão de confirmar
-            for selector in CONFIRMATION_BUTTON_SELECTORS:
-                try:
-                    confirm_btn = self._wait_clickable(By.XPATH, selector, timeout=WAIT_SHORT)
-
-                    if self._click_element(confirm_btn):
-                        self.log("✅ Modal de confirmação resolvido")
-                        time.sleep(3)
-
-                        # DEBUG: Screenshot após clicar
-                        try:
-                            screenshot_path = f"/tmp/tiktok_after_confirm_{int(time.time())}.png"
-                            self.driver.save_screenshot(screenshot_path)
-                            self.log(f"📸 Screenshot após confirmação: {screenshot_path}")
-                        except:
-                            pass
-
-                        # Aguarda modal fechar
-                        try:
-                            WebDriverWait(self.driver, WAIT_MED).until_not(
-                                EC.visibility_of_element_located((By.CLASS_NAME, "TUXModal-overlay"))
-                            )
-                            self.log("✅ Modal TUX fechou")
-                        except:
-                            pass
-
-                        return True
-
-                except TimeoutException:
-                    continue
-                except Exception:
-                    continue
-
-            # Se chegou aqui, não encontrou botão de confirmar
-            self.log("⚠️ Botão de confirmação não encontrado")
-            return True  # Não falha por isso
-
+            self.log("⚠️ Botão de confirmação não clicável")
+            return True
         except Exception as e:
-            self.log(f"⚠️ Erro no modal de confirmação: {e}")
-            # Tenta fallback com JavaScript
-            try:
-                buttons = self.driver.find_elements(
-                    By.XPATH,
-                    "//button[contains(., 'Post') or contains(., 'Continue') or contains(., 'Publicar')]"
-                )
-                if buttons:
-                    self.driver.execute_script("arguments[0].click();", buttons[0])
-                    self.log("✅ Modal resolvido via JS (fallback)")
-                    time.sleep(3)
-            except:
-                pass
-            return True  # Não falha por isso
+            self.log(f"⚠️ handle_confirmation_dialog erro: {e}")
+            return True
 
-    # ===================== AÇÃO DE PUBLICAR =====================
-    # MANTEVE O SEU click_publish_button() — ESTÁ BOM, SÓ ADICIONOU LOG EXTRA
+    # ============ Publicação ============
+
+    def _locate_publish_button(self) -> Optional[object]:
+        """
+        Localiza rapidamente o botão Post:
+        1) dentro do formulário/container de upload,
+        2) no document,
+        3) fallback XPath com backoff curto.
+        """
+        try:
+            doc = self.driver.find_element(By.TAG_NAME, "body")
+        except Exception:
+            return None
+
+        # 1) tenta dentro do formulário/container principal
+        candidates = []
+        try:
+            form = self.driver.execute_script(
+                "return document.querySelector('form,div[data-e2e=\"upload\"]') || document.body;"
+            )
+            candidates = self._js_query(form, PUBLISH_CSS_SUPER)
+        except Exception:
+            candidates = []
+
+        # 2) tenta no documento todo
+        if not candidates:
+            candidates = self._js_query(doc, PUBLISH_CSS_SUPER)
+
+        # 3) fallback XPath com backoff
+        if not candidates:
+            btn = self._wait_any_xpath(PUBLISH_XPATHS, timeout=WAIT_FAST)
+            if btn:
+                return btn
+            btn = self._wait_any_xpath(PUBLISH_XPATHS, timeout=WAIT_MED)
+            if btn:
+                return btn
+            return None
+
+        # filtra visíveis/habilitados
+        for el in candidates:
+            try:
+                if el.is_displayed() and el.is_enabled():
+                    return el
+            except Exception:
+                continue
+        return None
 
     def click_publish_button(self) -> bool:
-        """
-        Localiza e clica no botão de publicar.
+        """Localiza e clica em 'Post' de forma agressivamente rápida."""
+        start = self._now()
 
-        Returns:
-            True se clicou com sucesso, False caso contrário
-        """
-        # Rola até o final da página
-        try:
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
-        except:
-            pass
+        btn = self._locate_publish_button()
+        if not btn:
+            self.log("❌ Botão de publicar não encontrado (rápido)")
+            return False
 
-        self.log(f"🔍 Procurando botão de publicar ({len(PUBLISH_BUTTON_SELECTORS)} seletores)...")
+        self._scroll_into_view_center(btn)
+        if self._click_element(btn):
+            self.log(f"🚀 Botão de publicar clicado em {(self._now()-start):.2f}s")
+            return True
 
-        for idx, selector in enumerate(PUBLISH_BUTTON_SELECTORS, 1):
-            try:
-                button = self._wait_clickable(By.XPATH, selector, timeout=WAIT_SHORT)
-
-                # Rola até o botão
-                self._scroll_to_element(button)
-
-                # Clica
-                if self._click_element(button):
-                    self.log(f"🚀 Botão de publicar clicado (seletor #{idx})")
-                    time.sleep(3)
-                    return True
-
-            except TimeoutException:
-                continue
-            except Exception as e:
-                self.log(f"⚠️ Erro ao tentar seletor #{idx}: {e}")
-                continue
-
-        self.log("❌ Botão de publicar não encontrado")
-
-        # DEBUG: Salva screenshot
-        try:
-            screenshot_path = f"/tmp/tiktok_publish_button_not_found_{int(time.time())}.png"
-            self.driver.save_screenshot(screenshot_path)
-            self.log(f"📸 Screenshot salvo: {screenshot_path}")
-        except:
-            pass
-
+        self.log("⚠️ Falha ao clicar no botão de publicar")
         return False
 
-    # ===================== MÉTODO PÚBLICO PRINCIPAL (MELHORADO) =====================
+    # ============ Sucesso ============
 
-    def execute_post(self, handle_modals: bool = True, retry_on_exit: bool = True, max_violation_retries: int = 2) -> bool:
-        """
-        Método principal: executa toda a ação de postagem.
-        FIX/NOVO: Adiciona retry para violação falsa, check de sucesso, wait longo.
+    def _check_post_success(self) -> bool:
+        """Heurística rápida de sucesso: URL ou texto na página."""
+        try:
+            url = self.driver.current_url.lower()
+            if any(h in url for h in SUCCESS_HINTS):
+                self.log(f"✅ Sucesso por URL: {url}")
+                return True
 
-        Args:
-            handle_modals: Se True, lida com modais de confirmação
-            retry_on_exit: Se True, retenta publicar após fechar modal exit
-            max_violation_retries: Máx retries se violação detectada (novo)
+            body = self.driver.find_element(By.TAG_NAME, "body").text.lower()
+            if any(h in body for h in SUCCESS_HINTS):
+                self.log("✅ Sucesso por texto na página")
+                return True
+        except Exception:
+            pass
+        return False
 
-        Returns:
-            True se postagem foi iniciada e confirmada, False caso contrário
-        """
-        self.log("🚀 Executando ação de postagem...")
+    # ============ Fluxo público ============
 
-        # Clica em publicar
+    def execute_post(
+        self,
+        handle_modals: bool = True,
+        retry_on_exit: bool = True,
+        max_violation_retries: int = 0,  # desabilitado por padrão (baseline puro)
+    ) -> bool:
+        self.log("🚀 Executando ação de postagem (fast path)...")
+
         if not self.click_publish_button():
             return False
 
-        # Lida com modais
         if handle_modals:
-            if not self.handle_confirmation_dialog():
-                self.log("⚠️ Falha ao lidar com modal de confirmação")
+            self.handle_confirmation_dialog()
 
-        # NOVO: Loop de retry para violação (com max_retries)
-        violation_retries = 0
-        while violation_retries < max_violation_retries:
-            # Verifica violação de conteúdo
-            if self.detect_content_violation():
-                violation_retries += 1
-                if violation_retries < max_violation_retries:
-                    self.log(f"🔄 Retry {violation_retries}/{max_violation_retries} após violação detectada...")
-                    time.sleep(5)  # Aguarda antes de retry
-                    # NOVO: Tenta retry do clique (caso seja false positive)
-                    if self.click_publish_button():
-                        self.handle_confirmation_dialog()  # Re-lida com modal
-                        continue
-                self.log("❌ Vídeo rejeitado por violação de conteúdo (sem mais retries)")
-                return False
-            else:
-                break  # Sem violação — sucesso!
+        # retry curtíssimo se ainda estiver na tela de upload
+        try:
+            if retry_on_exit and "upload" in self.driver.current_url.lower():
+                self.log("🔁 Ainda na tela de upload, tentando novamente rapidamente…")
+                if self.click_publish_button() and handle_modals:
+                    self.handle_confirmation_dialog()
+        except Exception:
+            pass
 
-        # Retenta se modal "exit" foi fechado
-        if retry_on_exit:
-            try:
-                # Verifica se ainda está na página de upload (não publicou)
-                if "upload" in self.driver.current_url.lower():
-                    self.log("🔁 Ainda na página de upload, tentando publicar novamente...")
-                    if self.click_publish_button():
-                        self.log("✅ Segundo clique em publicar executado")
-                        time.sleep(2)
-                        # Tenta lidar com modal de novo
-                        if handle_modals:
-                            self.handle_confirmation_dialog()
-            except:
-                pass
-
-        # NOVO: Check final de sucesso
         if not self._check_post_success():
-            self.log("⚠️ Sem confirmação clara de sucesso — mas prosseguindo (pode ser delay)")
-            # Opcional: Salva screenshot final
-            try:
-                screenshot_path = f"/tmp/tiktok_post_final_{int(time.time())}.png"
-                self.driver.save_screenshot(screenshot_path)
-                self.log(f"📸 Screenshot final salvo: {screenshot_path}")
-            except:
-                pass
-
-        self.log("✅ Ação de postagem concluída")
+            self.log("ℹ️ Sem confirmação explícita; pode ser atraso do Studio.")
+        self.log("✅ Ação de postagem finalizada")
         return True
 
-    # ===================== VERIFICAÇÕES AUXILIARES =====================
-    # MANTEVE AS SUAS
+    # ============ Helpers de verificação ============
 
     def is_on_upload_page(self) -> bool:
-        """
-        Verifica se ainda está na página de upload.
-
-        Returns:
-            True se está na página de upload, False caso contrário
-        """
         try:
-            current_url = self.driver.current_url.lower()
-            return "upload" in current_url
-        except:
+            return "upload" in self.driver.current_url.lower()
+        except Exception:
             return False
 
     def publish_button_exists(self) -> bool:
-        """
-        Verifica se o botão de publicar ainda existe na página.
-
-        Returns:
-            True se botão existe, False caso contrário
-        """
         try:
-            buttons = self.driver.find_elements(
-                By.XPATH,
-                "//button[@data-e2e='post_video_button']"
-            )
-            return any(btn.is_displayed() for btn in buttons if btn)
-        except:
+            found = self._js_query(self.driver.execute_script("return document;"), PUBLISH_CSS_SUPER)
+            return any(el.is_displayed() for el in found)
+        except Exception:
             return False

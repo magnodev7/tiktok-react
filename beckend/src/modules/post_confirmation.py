@@ -1,22 +1,33 @@
+# -*- coding: utf-8 -*-
 """
-Módulo 5: Confirmação de Postagem
-Verifica se o vídeo foi efetivamente postado e aparece na lista de vídeos publicados
+Módulo 5: Confirmação de Postagem (v4.1)
+- Evita falsos positivos: 'Checking in progress...' NÃO é sucesso.
+- Sinais fortes para PUBLISHED: URL de vídeo, sumiço do botão de postar, hard success text.
+- Poll 1s, probing antecipado em 70% e FORÇADO após 60s.
+- Early-exit estrito: fora de upload + botão de postar ausente.
+- API compatível: wait_for_confirmation(timeout)->bool e confirm_posted()->ConfirmationResult.
 """
+
 import time
 import re
 import unicodedata
-from typing import Optional, Callable, Tuple
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional, Callable, Tuple, List, Dict
 
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
-# Constantes
-CONFIRMATION_TIMEOUT = 90  # FIX: Aumentado para 90s (TikTok demora)
-POLL_INTERVAL = 3  # FIX: Poll a cada 3s (melhor para async)
+# ===================== Configs =====================
 
-# FIX: URLs expandidas (mais patterns do TikTok recente)
+CONFIRMATION_TIMEOUT = 90
+POLL_INTERVAL = 1.0
+PROBING_THRESHOLD = 0.7
+PROBING_MAX_WAIT = 12
+EARLY_EXIT_THRESHOLD = 50
+FORCE_PROBE_AFTER = 60  # <- NOVO: força probing após 60s
+
 SUCCESS_URL_FRAGMENTS = (
     "/post",
     "/content",
@@ -24,52 +35,49 @@ SUCCESS_URL_FRAGMENTS = (
     "/content/manage",
     "/post/success",
     "/upload/success",
-    # FIX: Adicionados redirecionamentos comuns
     "/analytics",
     "/creator_center?tab=posted",
     "/tiktokstudio/analytics",
-    "/video/",  # Redireciona para vídeo postado
+    "/video/",
     "published",
     "success",
 )
 
-# FIX: Keywords expandidas (mais variações PT/EN)
-SUCCESS_KEYWORDS = (
+HARD_SUCCESS_KEYWORDS = (
     "video posted successfully",
     "video has been posted",
     "video uploaded successfully",
     "video has been uploaded",
-    "video is under review",
-    "post submitted",
     "post successful",
-    "postagem enviada",
-    "postagem publicada",
-    "postagem concluida",
-    "publicacao enviada",
-    "publicacao publicada",
-    "publicado com sucesso",
-    "enviado com sucesso",
-    "upload concluido",
-    "upload finalizado",
-    "upload bem sucedido",
-    "upload bem-sucedido",
-    "upload successful",
-    "uploaded successfully",
-    "vamos avisar quando estiver pronto",
-    "we will notify you when it's done",
-    "we'll notify you when it's done",
     "successfully submitted",
     "successfully published",
-    # FIX: Adicionadas variações comuns do TikTok
     "your video is now live",
     "published!",
     "video published",
     "vídeo publicado",
-    "agora ao vivo",
-    "processamento concluído",
+    "publicado com sucesso",
+    "upload concluido",
+    "upload finalizado",
+    "upload bem sucedido",
+    "upload bem-sucedido",
+    "ready to view",
     "congratulations",
     "done!",
-    "ready to view",
+)
+
+SUBMITTED_KEYWORDS = (
+    "post submitted",
+    "postagem enviada",
+    "publicacao enviada",
+    "we will notify you when it's done",
+    "we'll notify you when it's done",
+    "vamos avisar quando estiver pronto",
+    "checking in progress",
+    "verificação em andamento",
+    "checando em andamento",
+    "video is under review",
+    "processing your video",
+    "processando video",
 )
 
 PROGRESS_TOKENS = (
@@ -77,8 +85,8 @@ PROGRESS_TOKENS = (
     "hour left", "hours left", "remaining", "left to upload",
     "left to finish", "left to publish", "uploading", "upload progress",
     "upload em andamento", "enviando", "carregando",
-    "processing your video", "processing video", "processing upload",
-    "processando video", "processando upload", "progresso", "progress",
+    "processing video", "processing upload",
+    "processando upload", "progresso", "progress",
 )
 
 PROGRESS_PATTERNS = (
@@ -89,7 +97,6 @@ PROGRESS_PATTERNS = (
     re.compile(r"\bhours?\s+(?:left|remaining)\b"),
 )
 
-# FIX: Seletores expandidos (mais toasts/modals)
 STATUS_TEXT_SELECTORS = (
     "//*[@role='status' or @role='alert' or @aria-live]",
     "//*[contains(@data-e2e, 'result')]",
@@ -100,13 +107,11 @@ STATUS_TEXT_SELECTORS = (
     "//*[contains(@class, 'result')]",
     "//*[contains(@class, 'success')]",
     "//*[contains(@class, 'progress')]",
-    # FIX: Adicionados para toasts/modals recentes
     "//div[contains(@class, 'notification') or contains(@class, 'toast')]",
     "//*[contains(text(), 'success') or contains(text(), 'posted')]",
     "//div[@role='dialog']//*[@data-e2e='success-message']",
 )
 
-# FIX: Seletores para spinner/loading (para wait sumir)
 LOADING_SELECTORS = (
     ".upload-progress",
     ".processing-spinner",
@@ -115,406 +120,459 @@ LOADING_SELECTORS = (
     "[class*='spinner']",
 )
 
+# ===================== Estados & Resultado =====================
+
+class ConfirmationStatus(Enum):
+    UNKNOWN = "unknown"
+    SUBMITTED = "submitted"
+    PUBLISHED = "published"
+
+@dataclass
+class ConfirmationSignals:
+    url_changed: bool = False
+    left_upload: bool = False
+    video_url_detected: bool = False
+    publish_button_disappeared: bool = False
+    hard_success_text: Optional[str] = None
+    submitted_text: Optional[str] = None
+    progress_snippets: List[str] = field(default_factory=list)
+    success_snippets: List[str] = field(default_factory=list)
+    current_url: str = ""
+    progress_percentage: float = 0.0
+
+@dataclass
+class ConfirmationResult:
+    status: ConfirmationStatus
+    signals: ConfirmationSignals
+    reason: str
+
+    def is_published(self) -> bool:
+        return self.status == ConfirmationStatus.PUBLISHED
+
+    def is_submitted(self) -> bool:
+        return self.status == ConfirmationStatus.SUBMITTED
+
+# ===================== Módulo =====================
 
 class PostConfirmationModule:
-    """
-    Módulo responsável pela confirmação de postagem no TikTok.
-    Verifica se o vídeo foi efetivamente publicado através de múltiplos sinais:
-    - Mudança de URL
-    - Mensagens de sucesso
-    - Desaparecimento do botão de publicar
-    """
-
     def __init__(self, driver, logger: Optional[Callable] = None):
-        """
-        Inicializa o módulo de confirmação de postagem.
-
-        Args:
-            driver: WebDriver do Selenium
-            logger: Função de logging (opcional, usa print por padrão)
-        """
         self.driver = driver
         self.log = logger if logger else print
+        self._cached_signals: Optional[ConfirmationSignals] = None
+        self._expected_title: Optional[str] = None
+        self._username: Optional[str] = None
 
-    # ===================== MÉTODOS UTILITÁRIOS =====================
-    # MANTEVE OS SEUS (bons!)
+    # Contexto (opcional)
+    def set_context(self, expected_title: Optional[str] = None, username: Optional[str] = None):
+        self._expected_title = expected_title
+        self._username = username
 
+    # Utils
     @staticmethod
-    def _normalize_text(text: str) -> str:
-        """Normaliza texto para comparação"""
-        normalized = unicodedata.normalize("NFKD", text or "")
+    def _normalize_text(content: str) -> str:
+        normalized = unicodedata.normalize("NFKD", content or "")
         normalized = normalized.encode("ascii", "ignore").decode().lower()
         return " ".join(normalized.split())
 
     @staticmethod
     def _shorten_text(text: str) -> str:
-        """Encurta texto para exibição"""
         single_line = " ".join((text or "").split())
         return single_line if len(single_line) <= 120 else single_line[:117] + "..."
 
     @staticmethod
-    def _is_progress_text(norm_text: str) -> bool:
-        """Verifica se texto indica progresso"""
+    def _is_progress_text(norm_text: str) -> Tuple[bool, float]:
         if not norm_text:
-            return False
+            return False, 0.0
         if any(token in norm_text for token in PROGRESS_TOKENS):
-            return True
+            return True, 0.0
         for pattern in PROGRESS_PATTERNS:
-            if pattern.search(norm_text):
-                return True
-        return False
+            match = pattern.search(norm_text)
+            if match:
+                if '%' in match.group():
+                    try:
+                        pct_match = re.search(r'(\d+(?:\.\d+)?)%', match.group())
+                        pct = float(pct_match.group(1)) if pct_match else 0.0
+                        return True, pct
+                    except ValueError:
+                        return True, 0.0
+                return True, 0.0
+        return False, 0.0
 
-    # ===================== COLETA DE MENSAGENS =====================
-    # FIX: ADICIONOU WAIT PARA ELEMENTOS CARREGarem
+    def _now_url(self) -> str:
+        try:
+            return (self.driver.current_url or "").lower()
+        except Exception:
+            return ""
 
-    def _scan_status_messages(self) -> Tuple[list, list]:
-        """
-        Coleta mensagens de status/progresso exibidas na página.
+    # Coleta
+    def _scan_status_messages(self, refresh: bool = False) -> Tuple[List[str], List[str], Optional[str], Optional[str], float]:
+        if not refresh and self._cached_signals:
+            return (
+                self._cached_signals.progress_snippets,
+                self._cached_signals.success_snippets,
+                self._cached_signals.hard_success_text,
+                self._cached_signals.submitted_text,
+                self._cached_signals.progress_percentage,
+            )
 
-        Returns:
-            Tupla (progress_snippets: list, success_snippets: list)
-        """
         try:
             self.driver.switch_to.default_content()
         except Exception:
             pass
 
-        progress_snippets = []
-        success_snippets = []
-        seen_norm = set()
+        progress_snippets: List[str] = []
+        success_snippets: List[str] = []
+        hard_success_text: Optional[str] = None
+        submitted_text: Optional[str] = None
+        progress_pct_sum = 0.0
+        pct_count = 0
 
-        # FIX: Wait curto para elementos carregarem
         try:
-            WebDriverWait(self.driver, 3).until(
-                lambda d: len(d.find_elements(By.XPATH, "//body")) > 0
-            )
+            WebDriverWait(self.driver, 1).until(lambda d: len(d.find_elements(By.XPATH, "//body")) > 0)
         except TimeoutException:
             pass
 
-        # Procura elementos de status
+        def _classify_text(raw: str):
+            nonlocal hard_success_text, submitted_text, progress_pct_sum, pct_count
+            text = (raw or "").strip()
+            if not text:
+                return
+            norm = self._normalize_text(text)
+            if not norm:
+                return
+            snippet = self._shorten_text(text)
+
+            if any(k in norm for k in HARD_SUCCESS_KEYWORDS):
+                success_snippets.append(snippet)
+                if hard_success_text is None:
+                    hard_success_text = snippet
+            elif any(k in norm for k in SUBMITTED_KEYWORDS):
+                success_snippets.append(snippet)
+                if submitted_text is None:
+                    submitted_text = snippet
+            else:
+                is_progress, pct = self._is_progress_text(norm)
+                if is_progress:
+                    progress_snippets.append(snippet)
+                    if pct > 0:
+                        progress_pct_sum += pct
+                        pct_count += 1
+
         for selector in STATUS_TEXT_SELECTORS:
             try:
-                elements = self.driver.find_elements(By.XPATH, selector)
+                for el in self.driver.find_elements(By.XPATH, selector):
+                    try:
+                        _classify_text(el.text)
+                    except StaleElementReferenceException:
+                        continue
+                    except Exception:
+                        continue
             except Exception:
                 continue
 
-            for element in elements:
-                try:
-                    text = element.text.strip()
-                except StaleElementReferenceException:
-                    continue
-                except Exception:
-                    continue
-
-                if not text:
-                    continue
-
-                norm_text = self._normalize_text(text)
-                if not norm_text or norm_text in seen_norm:
-                    continue
-
-                seen_norm.add(norm_text)
-                snippet = self._shorten_text(text)
-
-                if self._is_progress_text(norm_text):
-                    progress_snippets.append(snippet)
-                elif any(keyword in norm_text for keyword in SUCCESS_KEYWORDS):
-                    success_snippets.append(snippet)
-
-        # Verifica body também
         try:
             body_text = self.driver.find_element(By.TAG_NAME, "body").text
+            _classify_text(body_text)
         except Exception:
-            body_text = ""
+            pass
 
-        if body_text:
-            norm_body = self._normalize_text(body_text)
-            if norm_body and norm_body not in seen_norm:
-                snippet = self._shorten_text(body_text)
-                if self._is_progress_text(norm_body):
-                    progress_snippets.append(snippet)
-                elif any(keyword in norm_body for keyword in SUCCESS_KEYWORDS):
-                    success_snippets.append(snippet)
+        avg_pct = (progress_pct_sum / pct_count) if pct_count > 0 else 0.0
 
-        return progress_snippets, success_snippets
+        if not refresh:
+            self._cached_signals = ConfirmationSignals(
+                progress_snippets=progress_snippets,
+                success_snippets=success_snippets,
+                hard_success_text=hard_success_text,
+                submitted_text=submitted_text,
+                progress_percentage=avg_pct,
+            )
 
-    # ===================== VERIFICAÇÕES DE SUCESSO =====================
-    # FIX: MELHOROU URL CHECK (SAI DE UPLOAD = SUCESSO)
+        return progress_snippets, success_snippets, hard_success_text, submitted_text, avg_pct
 
-    def check_url_changed(self) -> bool:
-        """
-        Verifica se a URL mudou para uma página de sucesso.
-
-        Returns:
-            True se URL indica sucesso, False caso contrário
-        """
-        try:
-            current_url = (self.driver.current_url or "").lower()
-        except Exception:
-            return False
-
-        # FIX: Primeiro, checa se saiu de upload (mesmo sem fragment específico)
-        if "upload" not in current_url:
-            self.log(f"✅ Saiu da página de upload: {current_url}")
-            return True
-
-        # Verifica se mudou para URL de sucesso
-        if any(fragment in current_url for fragment in SUCCESS_URL_FRAGMENTS):
-            self.log(f"✅ URL mudou para sucesso: {current_url}")
-            return True
-
-        return False
-
-    # MANTEVE check_publish_button_disappeared() — BOM
+    # Checks
+    def check_url_changed(self) -> Tuple[bool, bool, bool]:
+        url = self._now_url()
+        left_upload = "upload" not in url
+        video_url_detected = "/video/" in url or "tiktok.com/v/" in url
+        url_changed = left_upload or any(f in url for f in SUCCESS_URL_FRAGMENTS)
+        if left_upload:
+            self.log(f"✅ Saiu da página de upload: {url}")
+        if video_url_detected:
+            self.log(f"✅ URL de vídeo detectada: {url}")
+        return url_changed, left_upload, video_url_detected
 
     def check_publish_button_disappeared(self) -> bool:
-        """
-        Verifica se o botão de publicar desapareceu.
-
-        Returns:
-            True se botão sumiu, False caso contrário
-        """
         try:
             self.driver.switch_to.default_content()
         except Exception:
             pass
-
         try:
-            buttons = self.driver.find_elements(
-                By.XPATH,
-                "//button[@data-e2e='post_video_button']"
-            )
+            buttons = self.driver.find_elements(By.XPATH, "//button[@data-e2e='post_video_button']")
             if not any(btn.is_displayed() for btn in buttons if btn):
-                self.log("✅ Botão sumiu - vídeo publicado!")
+                self.log("✅ Botão 'Publicar' ausente")
                 return True
-        except:
+        except Exception:
             pass
-
         return False
 
-    # MANTEVE check_success_message() — BOM
-
-    def check_success_message(self) -> Optional[str]:
-        """
-        Verifica se há mensagem de sucesso exibida.
-
-        Returns:
-            Mensagem de sucesso se encontrada, None caso contrário
-        """
-        _, success_snippets = self._scan_status_messages()
-
-        if success_snippets:
-            message = success_snippets[0]
-            self.log(f"✅ Confirmação exibida: {message}")
-            return message
-
-        return None
-
-    # FIX: NOVO MÉTODO PARA WAIT SPINNER SUMIR
-    def wait_for_loading_to_finish(self, timeout: int = 30) -> bool:
-        """
-        FIX: Aguarda spinner/loading sumir (sinal de processamento concluído).
-        """
+    def wait_for_loading_to_finish(self, timeout: int = 10) -> bool:
         try:
             WebDriverWait(self.driver, timeout).until_not(
                 lambda d: any(d.find_elements(By.CSS_SELECTOR, sel) for sel in LOADING_SELECTORS)
             )
-            self.log("✅ Spinner/loading sumiu — processamento concluído")
+            self.log("✅ Loading sumiu")
             return True
         except TimeoutException:
-            self.log("⚠️ Timeout aguardando spinner sumir")
+            self.log("⚠️ Timeout aguardando loading")
             return False
 
-    # ===================== MÉTODOS DE ESPERA =====================
-    # FIX: MELHOROU O LOOP (POLL 3s, CHECK SPINNER, RETRY STALE, FALLBACK)
+    # Probing
+    def _probe_creator_center_posted(self, max_wait: int = PROBING_MAX_WAIT) -> bool:
+        """Abre o Creator Center (tab=posted) e tenta detectar cards e navegar para um /video/."""
+        try:
+            target = "https://www.tiktok.com/tiktokstudio?tab=posted"
+            self.log("🔎 Probing Creator Center (tab=posted)...")
+            self.driver.get(target)
 
-    def wait_for_confirmation(self, timeout: int = CONFIRMATION_TIMEOUT) -> bool:
-        """
-        Aguarda confirmação de postagem observando múltiplos sinais.
+            end = time.time() + max_wait
+            found_any = False
+            while time.time() < end:
+                try:
+                    links = self.driver.find_elements(By.XPATH, "//a[contains(@href, '/video/')]")
+                    if links:
+                        found_any = True
+                        try:
+                            links[0].click()
+                            time.sleep(1.5)
+                        except Exception:
+                            pass
+                        url = self._now_url()
+                        if "/video/" in url:
+                            self.log("✅ Navegou para URL de vídeo via Creator Center.")
+                            return True
+                    # fallback: cards sem link direto, mas lista existe
+                    cards = self.driver.find_elements(By.CSS_SELECTOR, "[data-e2e='post-list'] a, div[class*='post-card'], div[class*='video-item']")
+                    if cards:
+                        found_any = True
+                        # ausência do botão de postar já será capturada no próximo scan
+                        return True
+                except Exception:
+                    pass
+                time.sleep(1)
 
-        Args:
-            timeout: Tempo máximo de espera em segundos
+            if not found_any:
+                self.log("ℹ️ Creator Center sem cards/links ainda.")
+            return False
+        except Exception as e:
+            self.log(f"⚠️ Probing falhou: {e}")
+            return False
 
-        Returns:
-            True se postagem foi confirmada, False se timeout
-        """
-        deadline = time.time() + timeout
+    # Decisão
+    def _decide_status(self, signals: ConfirmationSignals, strict: bool) -> ConfirmationResult:
+        strong = signals.video_url_detected or signals.publish_button_disappeared or signals.hard_success_text
+        if strong:
+            return ConfirmationResult(
+                status=ConfirmationStatus.PUBLISHED,
+                signals=signals,
+                reason="Sinais fortes: URL de vídeo ou botão ausente ou texto de sucesso.",
+            )
+        partial = signals.left_upload and signals.submitted_text
+        if partial:
+            return ConfirmationResult(
+                status=ConfirmationStatus.SUBMITTED,
+                signals=signals,
+                reason="Saiu de upload + submitted/review – não deletar ainda.",
+            )
+        return ConfirmationResult(
+            status=ConfirmationStatus.UNKNOWN,
+            signals=signals,
+            reason="Sem sinais suficientes.",
+        )
+
+    # API principal
+    def confirm_posted(self, timeout: int = CONFIRMATION_TIMEOUT, strict: bool = True, quick_check: bool = False) -> ConfirmationResult:
+        if quick_check:
+            return self._quick_confirm(strict=strict)
+
+        start = time.time()
+        deadline = start + timeout
+        probe_done_pct = False
+        probe_done_force = False
         last_progress = ""
-        poll_count = 0
 
-        self.log(f"⏳ Aguardando confirmação de postagem (timeout: {timeout}s)...")
+        self.log(f"⏳ Aguardando confirmação (timeout: {timeout}s, strict={strict})...")
 
-        while time.time() < deadline:
-            poll_count += 1
+        while True:
+            now = time.time()
+            if now >= deadline:
+                break
+            remaining = deadline - now
+
             try:
-                # FIX: Sinal 0.5 - Aguarda spinner sumir primeiro (10s max)
-                if poll_count == 1:
-                    if self.wait_for_loading_to_finish(10):
-                        self.log("✅ Processamento inicial concluído")
+                progress_snips, success_snips, hard_text, submitted_text, avg_pct = self._scan_status_messages(refresh=True)
+                url_changed, left_upload, video_url_detected = self.check_url_changed()
+                button_gone = self.check_publish_button_disappeared()
 
-                # Sinal 1: URL mudou
-                if self.check_url_changed():
-                    return True
+                signals = ConfirmationSignals(
+                    url_changed=url_changed,
+                    left_upload=left_upload,
+                    video_url_detected=video_url_detected,
+                    publish_button_disappeared=button_gone,
+                    hard_success_text=hard_text,
+                    submitted_text=submitted_text,
+                    progress_snippets=progress_snips,
+                    success_snippets=success_snips,
+                    current_url=self._now_url(),
+                    progress_percentage=avg_pct,
+                )
 
-                # Sinal 2: Botão de publicar sumiu
-                if self.check_publish_button_disappeared():
-                    return True
+                result = self._decide_status(signals, strict=strict)
+                if result.is_published():
+                    self.log("🎉 Vídeo PUBLICADO (sinal forte).")
+                    return result
 
-                # Coleta mensagens
-                progress_snippets, success_snippets = self._scan_status_messages()
+                # probing por % (70%+)
+                if (not probe_done_pct) and avg_pct > PROBING_THRESHOLD:
+                    probe_done_pct = True
+                    if self._probe_creator_center_posted(max_wait=min(PROBING_MAX_WAIT, int(remaining))):
+                        # re-scan imediato
+                        continue
 
-                # Sinal 3: Mensagem de sucesso apareceu
-                if success_snippets:
-                    self.log(f"✅ Confirmação exibida: {success_snippets[0]}")
-                    return True
+                # probing forçado após FORCE_PROBE_AFTER
+                if (not probe_done_force) and (now - start) >= FORCE_PROBE_AFTER:
+                    probe_done_force = True
+                    if self._probe_creator_center_posted(max_wait=min(PROBING_MAX_WAIT, int(remaining))):
+                        continue
 
-                # Se ainda há progresso, aguarda
-                if progress_snippets:
-                    summary = "; ".join(progress_snippets[:2])
+                # early-exit estrito perto do fim: fora de upload + sem botão
+                if (now > (deadline - EARLY_EXIT_THRESHOLD)) and left_upload and button_gone:
+                    self.log("✅ Early-exit: fora de upload + botão ausente.")
+                    return ConfirmationResult(
+                        status=ConfirmationStatus.PUBLISHED,
+                        signals=signals,
+                        reason="Early-exit: fora de upload + botão ausente.",
+                    )
+
+                if progress_snips:
+                    summary = "; ".join(progress_snips[:2])
                     if summary != last_progress:
-                        self.log(f"⏳ Aguardando: {summary}")
+                        self.log(f"⏳ Aguardando: {summary} ({avg_pct:.0f}%)")
                         last_progress = summary
-                    time.sleep(POLL_INTERVAL)
-                    continue
-
-                # FIX: Após 30s sem progresso/erro, assume sucesso (fallback)
-                if time.time() > (deadline - 30) and not progress_snippets:
-                    self.log("✅ Sem progresso/erro após 30s — assumindo sucesso")
-                    return True
 
             except StaleElementReferenceException:
-                self.log("🔄 Elemento stale — retrying...")
-                time.sleep(1)
-                continue
+                self.log("🔄 Stale – retrying...")
             except Exception as e:
-                self.log(f"⚠️ Erro durante espera: {e}")
-                pass
+                self.log(f"⚠️ Erro aguardando: {e}")
 
-            time.sleep(POLL_INTERVAL)
+            time.sleep(min(POLL_INTERVAL, remaining))
 
-        # FIX: Screenshot em timeout para debug
+        # Timeout: snapshot final
         try:
             screenshot_path = f"/tmp/tiktok_confirmation_timeout_{int(time.time())}.png"
             self.driver.save_screenshot(screenshot_path)
-            self.log(f"📸 Screenshot de timeout salvo: {screenshot_path}")
-        except:
+            self.log(f"📸 Screenshot timeout: {screenshot_path}")
+        except Exception:
             pass
 
-        if last_progress:
-            self.log(f"⚠️ Timeout aguardando confirmação (último status: {last_progress})")
+        # Re-scan final
+        progress_snips, success_snips, hard_text, submitted_text, avg_pct = self._scan_status_messages(refresh=True)
+        url_changed, left_upload, video_url_detected = self.check_url_changed()
+        button_gone = self.check_publish_button_disappeared()
+        signals = ConfirmationSignals(
+            url_changed=url_changed,
+            left_upload=left_upload,
+            video_url_detected=video_url_detected,
+            publish_button_disappeared=button_gone,
+            hard_success_text=hard_text,
+            submitted_text=submitted_text,
+            progress_snippets=progress_snips,
+            success_snippets=success_snips,
+            current_url=self._now_url(),
+            progress_percentage=avg_pct,
+        )
+        result = self._decide_status(signals, strict=strict)
+
+        if result.is_published():
+            self.log("🎉 PUBLICADO no timeout.")
+        elif result.is_submitted():
+            self.log("ℹ️ SUBMITTED no timeout.")
         else:
-            self.log("⚠️ Timeout aguardando confirmação — cheque manualmente no perfil")
-        return False
+            self.log("⚠️ UNKNOWN no timeout.")
 
-    # ===================== VERIFICAÇÃO FINAL =====================
-    # FIX: MELHOROU verify_post_success() (usa wait spinner)
+        return result
 
-    def verify_post_success(self) -> bool:
-        """
-        Verifica de forma rápida se a postagem foi bem-sucedida.
-        Não aguarda, apenas checa sinais imediatos.
-
-        Returns:
-            True se há sinais de sucesso, False caso contrário
-        """
-        # FIX: Primeiro, checa se spinner sumiu
-        if self.wait_for_loading_to_finish(5):
-            self.log("✅ Spinner sumiu na verificação rápida")
-
-        # Verifica URL
-        if self.check_url_changed():
-            return True
-
-        # Verifica botão
-        if self.check_publish_button_disappeared():
-            return True
-
-        # Verifica mensagem
-        if self.check_success_message():
-            return True
-
-        return False
-
-    # ===================== MÉTODO PÚBLICO PRINCIPAL =====================
-    # MANTEVE O SEU — BOM
-
-    def confirm_posted(
-        self,
-        timeout: int = CONFIRMATION_TIMEOUT,
-        quick_check: bool = False
-    ) -> bool:
-        """
-        Método principal: confirma se vídeo foi postado.
-
-        Args:
-            timeout: Tempo máximo de espera (padrão: 90s)
-            quick_check: Se True, não aguarda, apenas verifica sinais imediatos
-
-        Returns:
-            True se postagem foi confirmada, False caso contrário
-        """
-        if quick_check:
-            self.log("🔍 Verificação rápida de postagem...")
-            result = self.verify_post_success()
-            if result:
-                self.log("🎉 Vídeo publicado com sucesso!")
-            else:
-                self.log("⚠️ Postagem não confirmada")
-            return result
+    def _quick_confirm(self, strict: bool) -> ConfirmationResult:
+        if self._cached_signals:
+            s = self._cached_signals
         else:
-            result = self.wait_for_confirmation(timeout=timeout)
-            if result:
-                self.log("🎉 Vídeo publicado com sucesso!")
-            else:
-                self.log("⚠️ Postagem não confirmada (pode ter sido publicado)")
-            return result
+            progress_snips, success_snips, hard_text, submitted_text, avg_pct = self._scan_status_messages(refresh=True)
+            url_changed, left_upload, video_url_detected = self.check_url_changed()
+            button_gone = self.check_publish_button_disappeared()
+            s = ConfirmationSignals(
+                url_changed=url_changed,
+                left_upload=left_upload,
+                video_url_detected=video_url_detected,
+                publish_button_disappeared=button_gone,
+                hard_success_text=hard_text,
+                submitted_text=submitted_text,
+                progress_snippets=progress_snips,
+                success_snippets=success_snips,
+                current_url=self._now_url(),
+                progress_percentage=avg_pct,
+            )
+            self._cached_signals = s
+        return self._decide_status(s, strict=strict)
 
-    # ===================== INFORMAÇÕES ADICIONAIS =====================
-    # MANTEVE OS SEUS — BOM
-
-    def get_post_status(self) -> dict:
-        """
-        Obtém informações detalhadas sobre o status da postagem.
-
-        Returns:
-            Dicionário com informações de status
-        """
-        url_changed = self.check_url_changed()
-        button_disappeared = self.check_publish_button_disappeared()
-        success_message = self.check_success_message()
-        progress_snippets, success_snippets = self._scan_status_messages()
-
-        current_url = ""
-        try:
-            current_url = self.driver.current_url
-        except:
-            pass
-
+    def get_post_status(self) -> Dict[str, object]:
+        if self._cached_signals:
+            s = self._cached_signals
+        else:
+            progress_snips, success_snips, hard_text, submitted_text, avg_pct = self._scan_status_messages(refresh=True)
+            url_changed, left_upload, video_url_detected = self.check_url_changed()
+            button_gone = self.check_publish_button_disappeared()
+            s = ConfirmationSignals(
+                url_changed=url_changed,
+                left_upload=left_upload,
+                video_url_detected=video_url_detected,
+                publish_button_disappeared=button_gone,
+                hard_success_text=hard_text,
+                submitted_text=submitted_text,
+                progress_snippets=progress_snips,
+                success_snippets=success_snips,
+                current_url=self._now_url(),
+                progress_percentage=avg_pct,
+            )
+            self._cached_signals = s
         return {
-            "url_changed": url_changed,
-            "button_disappeared": button_disappeared,
-            "success_message": success_message,
-            "has_progress": len(progress_snippets) > 0,
-            "has_success_text": len(success_snippets) > 0,
-            "current_url": current_url,
-            "progress_snippets": progress_snippets,
-            "success_snippets": success_snippets,
+            "url_changed": s.url_changed,
+            "left_upload": s.left_upload,
+            "video_url_detected": s.video_url_detected,
+            "publish_button_disappeared": s.publish_button_disappeared,
+            "hard_success_text": s.hard_success_text,
+            "submitted_text": s.submitted_text,
+            "has_progress": len(s.progress_snippets) > 0,
+            "has_success_text": len(s.success_snippets) > 0,
+            "progress_percentage": s.progress_percentage,
+            "current_url": s.current_url,
+            "progress_snippets": s.progress_snippets[:5],
+            "success_snippets": s.success_snippets[:5],
         }
 
     def print_status(self):
-        """Imprime status detalhado da postagem (útil para debug)"""
-        status = self.get_post_status()
-
+        s = self.get_post_status()
         self.log("📊 Status da postagem:")
-        self.log(f"   URL mudou: {status['url_changed']}")
-        self.log(f"   Botão sumiu: {status['button_disappeared']}")
-        self.log(f"   Mensagem de sucesso: {status['success_message'] or 'Não'}")
-        self.log(f"   Tem progresso: {status['has_progress']}")
-        self.log(f"   Tem texto de sucesso: {status['has_success_text']}")
-        self.log(f"   URL atual: {status['current_url']}")
+        self.log(f"   URL mudou: {s['url_changed']} | Saiu de upload: {s['left_upload']} | Vídeo URL: {s['video_url_detected']}")
+        self.log(f"   Botão sumiu: {s['publish_button_disappeared']}")
+        self.log(f"   Hard success: {s['hard_success_text'] or '—'}")
+        self.log(f"   Submitted: {s['submitted_text'] or '—'} | Progresso: {s['progress_percentage']:.0f}%")
+        self.log(f"   Tem progresso: {s['has_progress']} | Tem texto sucesso: {s['has_success_text']}")
+        self.log(f"   URL atual: {s['current_url']}")
+        if s['progress_snippets']:
+            self.log(f"   Progresso: {', '.join(s['progress_snippets'])}")
+        if s['success_snippets']:
+            self.log(f"   Sucesso: {', '.join(s['success_snippets'])}")
 
-        if status['progress_snippets']:
-            self.log(f"   Progresso: {', '.join(status['progress_snippets'][:2])}")
-
-        if status['success_snippets']:
-            self.log(f"   Sucesso: {', '.join(status['success_snippets'][:2])}")
+    # Wrapper legado
+    def wait_for_confirmation(self, timeout: int = CONFIRMATION_TIMEOUT) -> bool:
+        result = self.confirm_posted(timeout=timeout, strict=True, quick_check=False)
+        return result.is_published()

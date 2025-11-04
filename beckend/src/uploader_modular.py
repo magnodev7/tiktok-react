@@ -17,7 +17,11 @@ from .modules.video_upload import VideoUploadModule
 from .modules.description_handler import DescriptionModule
 from .modules.audience_selector import AudienceModule, AudienceType
 from .modules.post_action import PostActionModule
-from .modules.post_confirmation import PostConfirmationModule
+from .modules.post_confirmation import (
+    PostConfirmationModule,
+    CONFIRMATION_TIMEOUT,
+    ConfirmationStatus,
+)
 from .modules.file_manager import FileManagerModule
 from .modules.duplicate_protection import DuplicateProtectionModule
 
@@ -78,80 +82,35 @@ class TikTokUploader:
     # ===================== MÉTODOS PÚBLICOS (Interface Compatível) =====================
 
     def go_to_upload(self) -> bool:
-        """
-        Navega para página de upload.
-        DELEGADO para VideoUploadModule.
-
-        Returns:
-            True se conseguiu, False caso contrário
-        """
+        """Navega para página de upload (VideoUploadModule)."""
         return self.upload_module.navigate_to_upload_page()
 
     def send_file(self, video_path: str) -> bool:
-        """
-        Envia arquivo de vídeo.
-        DELEGADO para VideoUploadModule.
-
-        Args:
-            video_path: Caminho do vídeo
-
-        Returns:
-            True se enviou, False caso contrário
-        """
+        """Envia arquivo de vídeo (VideoUploadModule)."""
         return self.upload_module.send_video_file(video_path, retry=True)
 
     def fill_description(self, text: str) -> bool:
-        """
-        Preenche descrição.
-        DELEGADO para DescriptionModule.
-
-        Args:
-            text: Texto da descrição
-
-        Returns:
-            True se preencheu ou não era obrigatório, False caso contrário
-        """
+        """Preenche descrição (DescriptionModule)."""
         return self.description_module.fill_description(text, required=False)
 
     def set_audience_public(self) -> bool:
-        """
-        Define audiência como pública.
-        DELEGADO para AudienceModule.
-
-        Returns:
-            True sempre (não trava se não achar)
-        """
+        """Define audiência pública (AudienceModule)."""
         return self.audience_module.set_public(required=False)
 
     def click_publish(self) -> bool:
-        """
-        Clica no botão de publicar.
-        DELEGADO para PostActionModule.
-
-        Returns:
-            True se clicou, False caso contrário
-        """
+        """Clica em publicar (PostActionModule)."""
         return self.post_action_module.click_publish_button()
 
     def handle_confirmation_dialog(self) -> bool:
-        """
-        Lida com modal de confirmação.
-        DELEGADO para PostActionModule.
-
-        Returns:
-            True se lidou ou não apareceu, False se falhou
-        """
+        """Lida com modal de confirmação (PostActionModule)."""
         return self.post_action_module.handle_confirmation_dialog()
 
     def confirm_posted(self) -> bool:
         """
-        Confirma se vídeo foi publicado.
-        DELEGADO para PostConfirmationModule.
-
-        Returns:
-            True se publicou, False caso contrário
+        Compatibilidade LEGACY: retorna bool.
+        Internamente, usa wait_for_confirmation (estrito) do Módulo 5.
         """
-        return self.confirmation_module.confirm_posted(timeout=60, quick_check=False)
+        return self.confirmation_module.wait_for_confirmation(timeout=CONFIRMATION_TIMEOUT)
 
     # ===================== MÉTODO PRINCIPAL =====================
 
@@ -168,6 +127,8 @@ class TikTokUploader:
             True se publicou, False caso contrário
         """
         self.log(f"📹 Iniciando publicação: {os.path.basename(video_path)}")
+        if not posted_dir:
+            posted_dir = "./posted"
 
         # MÓDULO 0: Proteção contra Duplicatas (VERIFICAÇÃO PRÉVIA)
         self.log("🔹 Etapa 0/7: Verificação de duplicatas")
@@ -220,25 +181,43 @@ class TikTokUploader:
 
             # MÓDULO 4.6: Detecção de Violações
             self.log("🔹 Etapa 4.6/7: Verificação de violações")
-            if self.post_action_module.detect_content_violation():
+            if hasattr(self.post_action_module, "detect_content_violation") and self.post_action_module.detect_content_violation():
                 self.log("❌ Vídeo rejeitado por violação de conteúdo")
                 self.duplicate_protection.remove_posting_lock(video_path)
                 return False
 
-            # MÓDULO 4.7: Retry se modal "exit" foi fechado
-            if self.post_action_module.is_on_upload_page():
+            # MÓDULO 4.7: Retry se ainda estiver na tela de upload
+            if hasattr(self.post_action_module, "is_on_upload_page") and self.post_action_module.is_on_upload_page():
                 self.log("🔁 Ainda na página de upload, tentando publicar novamente...")
                 if self.click_publish():
                     self.log("✅ Segundo clique em publicar executado")
                     self.handle_confirmation_dialog()
 
-            # NOVO: Wait curto para resultado final (5s) — cobre delays do TikTok
+            # Pequeno buffer de estabilidade da UI
             self.log("⏳ Aguardando confirmação final do TikTok...")
-            time.sleep(5)  # Adicione isso aqui (import time no topo se não tiver)
+            time.sleep(5)
 
-            # MÓDULO 5: Confirmação de Postagem
+            # MÓDULO 5: Confirmação de Postagem (ESTRITA)
             self.log("🔹 Etapa 5/7: Confirmação de postagem")
-            if self.confirm_posted():
+            # Usa API nova (ConfirmationResult). Se não existir, cai para o wrapper bool.
+            result = None
+            if hasattr(self.confirmation_module, "confirm_posted"):
+                try:
+                    result = self.confirmation_module.confirm_posted(timeout=CONFIRMATION_TIMEOUT, strict=True, quick_check=False)
+                except TypeError:
+                    # Versões antigas podem ter assinatura diferente
+                    result = self.confirmation_module.confirm_posted(timeout=CONFIRMATION_TIMEOUT)
+            # Fallback legacy
+            if result is None or not hasattr(result, "status"):
+                ok_bool = self.confirmation_module.wait_for_confirmation(timeout=CONFIRMATION_TIMEOUT)
+                if ok_bool:
+                    result_status = ConfirmationStatus.PUBLISHED
+                else:
+                    result_status = ConfirmationStatus.UNKNOWN
+            else:
+                result_status = result.status
+
+            if result_status == ConfirmationStatus.PUBLISHED:
                 self.log("🎉 Vídeo publicado com sucesso!")
 
                 # MÓDULO 6: Marca como postado e remove lock
@@ -250,60 +229,44 @@ class TikTokUploader:
                     remove_lock=True
                 )
                 return True
-            else:
-                self.log("⚠️ Publicação não confirmada (pode ter sido publicado)")
 
-                # Remove lock mesmo sem confirmar
+            elif result_status == ConfirmationStatus.SUBMITTED:
+                self.log("ℹ️ Post submetido/under review — não mover/deletar ainda.")
+                self.duplicate_protection.remove_posting_lock(video_path)
+                return False
+
+            else:  # UNKNOWN
+                self.log("⚠️ Publicação não confirmada (UNKNOWN).")
                 self.duplicate_protection.remove_posting_lock(video_path)
                 return False
 
         except Exception as e:
             self.log(f"❌ Erro durante postagem: {e}")
-
-            # Remove lock em caso de erro
             self.duplicate_protection.remove_posting_lock(video_path)
             return False
 
     # ===================== MÉTODOS AUXILIARES PÚBLICOS =====================
 
     def get_post_status(self) -> dict:
-        """
-        Obtém status detalhado da postagem.
-        DELEGADO para PostConfirmationModule.
-
-        Returns:
-            Dicionário com informações de status
-        """
+        """Status detalhado da postagem (PostConfirmationModule)."""
         return self.confirmation_module.get_post_status()
 
     def print_status(self):
-        """
-        Imprime status detalhado (debug).
-        DELEGADO para PostConfirmationModule.
-        """
+        """Imprime status detalhado (debug)."""
         self.confirmation_module.print_status()
 
-    # ===================== MÉTODOS PARA GERENCIAMENTO DE ARQUIVOS =====================
+    # ===================== GERENCIAMENTO DE ARQUIVOS =====================
 
     def create_lock(self, video_path: str) -> bool:
-        """
-        Cria lock de postagem.
-        DELEGADO para FileManagerModule.
-        """
+        """Cria lock (FileManagerModule)."""
         return self.file_manager.create_lock(video_path)
 
     def remove_lock(self, video_path: str) -> bool:
-        """
-        Remove lock de postagem.
-        DELEGADO para FileManagerModule.
-        """
+        """Remove lock (FileManagerModule)."""
         return self.file_manager.remove_lock(video_path)
 
     def finalize_successful_post(self, video_path: str, posted_dir: str) -> bool:
-        """
-        Finaliza postagem bem-sucedida movendo para pasta 'posted'.
-        DELEGADO para FileManagerModule.
-        """
+        """Finaliza postagem movendo para 'posted' (FileManagerModule)."""
         return self.file_manager.finalize_successful_post(
             video_path=video_path,
             posted_dir=posted_dir,
@@ -311,31 +274,26 @@ class TikTokUploader:
         )
 
     def cleanup_failed_post(self, video_path: str) -> bool:
-        """
-        Limpa arquivos de postagem que falhou.
-        DELEGADO para FileManagerModule.
-        """
+        """Limpa artefatos de falha (FileManagerModule)."""
         return self.file_manager.cleanup_failed_post(video_path)
 
     # ===================== COMPATIBILIDADE COM CÓDIGO LEGADO =====================
 
-    # Propriedades/métodos que código antigo pode usar
     @property
     def _wait_element(self):
-        """Compatibilidade: acesso ao método do módulo de upload"""
+        """Compatibilidade: método do módulo de upload"""
         return self.upload_module._wait_element
 
     @property
     def _wait_visible(self):
-        """Compatibilidade: acesso ao método do módulo de descrição"""
+        """Compatibilidade: método do módulo de descrição"""
         return self.description_module._wait_visible
 
     @property
     def _wait_clickable(self):
-        """Compatibilidade: acesso ao método do módulo de ação"""
+        """Compatibilidade: método do módulo de ação"""
         return self.post_action_module._wait_clickable
 
-    # Métodos estáticos para compatibilidade
     @staticmethod
     def _normalize_text(text: str) -> str:
         """Compatibilidade: normalização de texto"""
@@ -349,21 +307,11 @@ class TikTokUploader:
         return VideoUploadModule._shorten_text(text)
 
 
-# ===================== FUNÇÕES DE COMPATIBILIDADE =====================
+# ===================== FUNÇÃO FACTORY =====================
 
 def create_uploader(driver, logger=None, account_name=None, **kwargs):
     """
-    Factory function para criar uploader.
-    Facilita migração de código antigo.
-
-    Args:
-        driver: WebDriver
-        logger: Logger (opcional)
-        account_name: Nome da conta
-        **kwargs: Argumentos adicionais ignorados
-
-    Returns:
-        Instância de TikTokUploader
+    Factory function para criar uploader (compatibilidade).
     """
     return TikTokUploader(
         driver=driver,

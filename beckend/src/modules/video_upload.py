@@ -1,12 +1,15 @@
 """
-Módulo 1: Upload e Validação do Vídeo
+Módulo 1: Upload e Validação do Vídeo (Versão Otimizada v2.4 - Fix Partial Match & UI Check)
 Responsável por enviar o vídeo e validar formato, tamanho e integridade
+Fixes: Partial match keywords, stall para 90%+, EC para UI pós-upload ("description", "hashtags").
 """
 import os
 import time
 import re
 import unicodedata
-from typing import Optional, Callable
+import subprocess
+from typing import Optional, Callable, Tuple, Set
+from contextlib import contextmanager
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -41,26 +44,47 @@ FILE_INPUT_SELECTORS = [
     (By.XPATH, "//input[@name='file']"),
 ]
 
-STATUS_TEXT_SELECTORS = (
-    "//*[@role='status' or @role='alert' or @aria-live]",
-    "//*[contains(@data-e2e, 'result')]",
-    "//*[contains(@data-e2e, 'success')]",
-    "//*[contains(@data-e2e, 'status')]",
-    "//*[contains(@data-e2e, 'progress')]",
-    "//*[contains(@data-testid, 'toast')]",
-    "//*[contains(@class, 'result')]",
-    "//*[contains(@class, 'success')]",
-    "//*[contains(@class, 'progress')]",
-)
+STATUS_TEXT_SELECTORS = [
+    (By.XPATH, "//*[@role='status' or @role='alert' or @aria-live]"),
+    (By.XPATH, "//*[contains(@data-e2e, 'result')]"),
+    (By.XPATH, "//*[contains(@data-e2e, 'success')]"),
+    (By.XPATH, "//*[contains(@data-e2e, 'status')]"),
+    (By.XPATH, "//*[contains(@data-e2e, 'progress')]"),
+    (By.XPATH, "//*[contains(@data-testid, 'toast')]"),
+    (By.XPATH, "//*[contains(@class, 'result')]"),
+    (By.XPATH, "//*[contains(@class, 'success')]"),
+    (By.XPATH, "//*[contains(@class, 'progress')]"),
+]
 
-PROGRESS_TOKENS = (
+# Novo: Seletores para UI pós-upload (do screenshot)
+POST_UPLOAD_SELECTORS = [
+    (By.CSS_SELECTOR, "[data-e2e='description-input']"),
+    (By.CSS_SELECTOR, "[data-e2e='hashtag-input']"),
+    (By.CSS_SELECTOR, "[class*='description']"),
+    (By.CSS_SELECTOR, "[class*='hashtags']"),
+    (By.CSS_SELECTOR, "[class*='edit-cover']"),
+]
+
+PROGRESS_TOKENS: Set[str] = {
     "minute left", "minutes left", "second left", "seconds left",
     "hour left", "hours left", "remaining", "left to upload",
     "left to finish", "left to publish", "uploading", "upload progress",
     "upload em andamento", "enviando", "carregando",
     "processing your video", "processing video", "processing upload",
     "processando video", "processando upload", "progresso", "progress",
-)
+}
+
+SUCCESS_KEYWORDS: Set[str] = {
+    # Expandidos com partials do screenshot/logs
+    "uploaded", "upload finalizado", "upload concluido", "upload bem sucedido",
+    "video uploaded successfully", "video has been uploaded", "video is under review",
+    "post submitted", "post successful", "postagem enviada", "postagem publicada",
+    "publicacao enviada", "publicacao publicada", "publicado com sucesso",
+    "enviado com sucesso", "upload successful", "uploaded successfully",
+    "vamos avisar quando estiver pronto", "we will notify you when it's done",
+    "successfully submitted", "successfully published", "checking in progress",
+    "replace", "details", "description", "hashtags", "mention", "cover edit",
+}
 
 PROGRESS_PATTERNS = (
     re.compile(r"\b\d{1,3}(?:\.\d+)?\s?%"),
@@ -68,19 +92,6 @@ PROGRESS_PATTERNS = (
     re.compile(r"\bminutes?\s+(?:left|remaining)\b"),
     re.compile(r"\bseconds?\s+(?:left|remaining)\b"),
     re.compile(r"\bhours?\s+(?:left|remaining)\b"),
-)
-
-SUCCESS_KEYWORDS = (
-    "video posted successfully", "video has been posted",
-    "video uploaded successfully", "video has been uploaded",
-    "video is under review", "post submitted", "post successful",
-    "postagem enviada", "postagem publicada", "postagem concluida",
-    "publicacao enviada", "publicacao publicada", "publicado com sucesso",
-    "enviado com sucesso", "upload concluido", "upload finalizado",
-    "upload bem sucedido", "upload bem-sucedido", "upload successful",
-    "uploaded successfully", "vamos avisar quando estiver pronto",
-    "we will notify you when it's done", "we'll notify you when it's done",
-    "successfully submitted", "successfully published",
 )
 
 
@@ -91,7 +102,7 @@ class VideoUploadModule:
     envio do arquivo e validação do processamento.
     """
 
-    def __init__(self, driver, logger: Optional[Callable] = None):
+    def __init__(self, driver, logger: Optional[Callable[[str], None]] = None):
         """
         Inicializa o módulo de upload.
 
@@ -120,15 +131,20 @@ class VideoUploadModule:
 
     @staticmethod
     def _is_progress_text(norm_text: str) -> bool:
-        """Verifica se texto indica progresso de upload"""
+        """Verifica se texto indica progresso de upload (otimizado com set)"""
         if not norm_text:
             return False
-        if any(token in norm_text for token in PROGRESS_TOKENS):
+        if PROGRESS_TOKENS & set(norm_text.split()):  # O(1) interseção
             return True
         for pattern in PROGRESS_PATTERNS:
             if pattern.search(norm_text):
                 return True
         return False
+
+    @staticmethod
+    def _has_success_partial(norm_text: str, keywords: Set[str]) -> bool:
+        """Partial match para keywords (não só split)"""
+        return any(kw in norm_text for kw in keywords)
 
     def _wait_element(self, by, value, timeout=WAIT_MED):
         """Espera elemento aparecer"""
@@ -136,133 +152,114 @@ class VideoUploadModule:
             EC.presence_of_element_located((by, value))
         )
 
+    @contextmanager
+    def _frame_context(self, frame_index: Optional[int]):
+        """Context manager para switch de frames, auto-reseta para default."""
+        try:
+            if frame_index is not None:
+                frames = self.driver.find_elements(By.TAG_NAME, "iframe")
+                if 0 <= frame_index < len(frames):
+                    self.driver.switch_to.frame(frames[frame_index])
+            yield
+        except Exception as e:
+            self.log(f"⚠️ Erro no frame {frame_index}: {e}")
+        finally:
+            try:
+                self.driver.switch_to.default_content()
+            except Exception:
+                pass
+
     # ===================== VALIDAÇÃO DE ARQUIVO =====================
 
-    def validate_video_file(self, video_path: str) -> bool:
+    def validate_video_file(self, video_path: str) -> Tuple[bool, str]:
         """
-        Valida se o arquivo de vídeo existe e atende aos requisitos.
+        Valida se o arquivo de vídeo existe e atende aos requisitos (avançada com duração opcional).
 
         Args:
             video_path: Caminho do arquivo de vídeo
 
         Returns:
-            True se válido, False caso contrário
+            Tuple[bool, str]: (válido, mensagem de erro/sucesso)
         """
         # Verifica existência
         if not os.path.isfile(video_path):
-            self.log(f"❌ Arquivo não encontrado: {video_path}")
-            return False
+            return False, f"Arquivo não encontrado: {video_path}"
 
         # Verifica tamanho mínimo (200KB)
         size_bytes = os.path.getsize(video_path)
         if size_bytes < 200 * 1024:
-            self.log(f"❌ Vídeo muito pequeno: {size_bytes} bytes (mínimo: 200KB)")
-            return False
+            return False, f"Vídeo muito pequeno: {size_bytes} bytes (mínimo: 200KB)"
 
         # Verifica extensão
         _, ext = os.path.splitext(video_path)
-        valid_extensions = ['.mp4', '.mov', '.avi', '.webm', '.mkv', '.flv']
+        valid_extensions = {'.mp4', '.mov', '.avi', '.webm', '.mkv', '.flv'}
         if ext.lower() not in valid_extensions:
-            self.log(f"⚠️ Extensão incomum: {ext} (pode não ser aceita)")
+            return False, f"Extensão inválida: {ext} (aceitas: {', '.join(valid_extensions)})"
 
-        self.log(f"✅ Arquivo validado: {os.path.basename(video_path)} ({size_bytes / (1024*1024):.2f} MB)")
-        return True
+        # Check duração (opcional, via ffprobe se disponível)
+        duration_msg = ""
+        try:
+            result = subprocess.run(
+                ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', '-of', 'csv=p=0', video_path],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                duration = float(result.stdout.strip())
+                if duration > 600:  # 10min
+                    return False, f"Duração excessiva: {duration/60:.1f}min (máx 10min)"
+                duration_msg = f" (duração: {duration/60:.1f}min)"
+        except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+            # Não quebra; log só
+            pass
+
+        msg = f"✅ Arquivo validado: {os.path.basename(video_path)} ({size_bytes / (1024*1024):.2f} MB{duration_msg})"
+        self.log(msg)
+        return True, msg
 
     # ===================== NAVEGAÇÃO E LOCALIZAÇÃO =====================
 
-    def _switch_to_context(self, frame_index: Optional[int]) -> bool:
-        """Seleciona página principal ou iframe"""
-        try:
-            self.driver.switch_to.default_content()
-        except Exception:
-            pass
-
-        if frame_index is None:
-            return True
-
-        try:
-            frames = self.driver.find_elements(By.TAG_NAME, "iframe")
-        except Exception:
-            return False
-
-        if frame_index < 0 or frame_index >= len(frames):
-            return False
-
-        try:
-            self.driver.switch_to.frame(frames[frame_index])
-            return True
-        except Exception:
-            try:
-                self.driver.switch_to.default_content()
-            except Exception:
-                pass
-            return False
-
     def _scan_for_file_input(self, timeout: int = WAIT_MED) -> bool:
         """
-        Procura input de upload na página principal e iframes.
+        Procura input de upload na página principal e iframes (otimizado: limite frames, sleeps menores).
         Atualiza self._file_input_context quando encontra.
         """
         deadline = time.time() + max(timeout, WAIT_SHORT)
-
-        while time.time() < deadline:
-            try:
-                self.driver.switch_to.default_content()
-            except Exception:
-                pass
-
-            try:
-                frames = self.driver.find_elements(By.TAG_NAME, "iframe")
-                frame_indices = list(range(len(frames)))
-            except Exception:
-                frame_indices = []
-
-            context_candidates = [None] + frame_indices
-
-            for frame_index in context_candidates:
-                if not self._switch_to_context(frame_index):
-                    continue
-
-                for by, value in FILE_INPUT_SELECTORS:
-                    try:
-                        element = self.driver.find_element(by, value)
-                    except NoSuchElementException:
-                        continue
-                    except Exception:
-                        continue
-
-                    if element:
-                        label = "principal" if frame_index is None else f"iframe[{frame_index}]"
-                        self._file_input_context = {
-                            "frame_index": frame_index,
-                            "by": by,
-                            "value": value,
-                        }
-                        self.log(f"✅ Campo de upload localizado ({label}) com seletor: {value}")
-                        try:
-                            self.driver.switch_to.default_content()
-                        except Exception:
-                            pass
-                        return True
-
-                try:
-                    self.driver.switch_to.default_content()
-                except Exception:
-                    pass
-
-            time.sleep(1)
-
+        frame_indices = [None]  # Priorize main primeiro
         try:
-            self.driver.switch_to.default_content()
+            frames = self.driver.find_elements(By.TAG_NAME, "iframe")
+            frame_indices.extend(range(min(2, len(frames))))  # Limite a 2 frames para eficiência
         except Exception:
             pass
+
+        while time.time() < deadline:
+            for frame_index in frame_indices:
+                with self._frame_context(frame_index):
+                    for by, value in FILE_INPUT_SELECTORS:
+                        try:
+                            element = self.driver.find_element(by, value)
+                            if element:
+                                label = "principal" if frame_index is None else f"iframe[{frame_index}]"
+                                self._file_input_context = {
+                                    "frame_index": frame_index,
+                                    "by": by,
+                                    "value": value,
+                                }
+                                self.log(f"✅ Campo de upload localizado ({label}) com seletor: {value}")
+                                return True
+                        except NoSuchElementException:
+                            continue
+                        except (StaleElementReferenceException, TimeoutException):
+                            continue  # Específicos para flakiness
+
+                time.sleep(0.5)  # Reduzido de 1s para eficiência
+            time.sleep(1)  # Outer sleep menor
 
         self._file_input_context = None
         return False
 
     def _resolve_file_input(self, timeout: int = WAIT_MED):
         """
-        Retorna elemento do input de upload.
+        Retorna elemento do input de upload (usa context manager).
         Mantém o driver no contexto correto.
         """
         attempts = 2
@@ -272,7 +269,7 @@ class VideoUploadModule:
                     time.sleep(1)
                     continue
 
-            context = self._file_input_context or {}
+            context = self._file_input_context
             frame_index = context.get("frame_index")
             by = context.get("by")
             value = context.get("value")
@@ -281,37 +278,16 @@ class VideoUploadModule:
                 self._file_input_context = None
                 continue
 
-            if not self._switch_to_context(frame_index):
-                self._file_input_context = None
-                time.sleep(1)
-                continue
-
-            try:
-                element = WebDriverWait(self.driver, WAIT_SHORT).until(
-                    EC.presence_of_element_located((by, value))
-                )
-                return element
-            except TimeoutException:
-                self._file_input_context = None
+            with self._frame_context(frame_index):
                 try:
-                    self.driver.switch_to.default_content()
-                except Exception:
-                    pass
-                time.sleep(1)
-                continue
-            except Exception:
-                self._file_input_context = None
-                try:
-                    self.driver.switch_to.default_content()
-                except Exception:
-                    pass
-                time.sleep(1)
-                continue
-
-        try:
-            self.driver.switch_to.default_content()
-        except Exception:
-            pass
+                    element = WebDriverWait(self.driver, WAIT_SHORT).until(
+                        EC.presence_of_element_located((by, value))
+                    )
+                    return element
+                except (TimeoutException, NoSuchElementException):
+                    self._file_input_context = None
+                    time.sleep(1)
+                    continue
 
         return None
 
@@ -330,7 +306,7 @@ class VideoUploadModule:
                 self.log(f"🌐 Acessando: {url}")
                 self.driver.set_page_load_timeout(30)
                 self.driver.get(url)
-                time.sleep(5)
+                time.sleep(3)  # Reduzido de 5s para eficiência
 
                 current_url = self.driver.current_url
                 self.log(f"🔍 URL atual: {current_url}")
@@ -350,7 +326,7 @@ class VideoUploadModule:
                     self.log(f"📸 Screenshot salvo: {screenshot_path}")
                     page_title = self.driver.title
                     self.log(f"📄 Título da página: {page_title}")
-                except:
+                except Exception:
                     pass
 
                 self.log("⚠️ Input de arquivo não encontrado")
@@ -366,101 +342,127 @@ class VideoUploadModule:
     # ===================== UPLOAD E MONITORAMENTO =====================
 
     def _scan_status_messages(self):
-        """Coleta mensagens de status/progresso exibidas na página"""
-        try:
-            self.driver.switch_to.default_content()
-        except Exception:
-            pass
+        """Coleta mensagens de status/progresso exibidas na página (usa context manager)"""
+        with self._frame_context(None):  # Default content
+            progress_snippets = []
+            success_snippets = []
+            seen_norm = set()
 
-        progress_snippets = []
-        success_snippets = []
-        seen_norm = set()
-
-        for selector in STATUS_TEXT_SELECTORS:
-            try:
-                elements = self.driver.find_elements(By.XPATH, selector)
-            except Exception:
-                continue
-
-            for element in elements:
+            for by, value in STATUS_TEXT_SELECTORS:  # Já como tuples
                 try:
-                    text = element.text.strip()
-                except StaleElementReferenceException:
-                    continue
+                    elements = self.driver.find_elements(by, value)
                 except Exception:
                     continue
 
-                if not text:
-                    continue
+                for element in elements:
+                    try:
+                        text = element.text.strip()
+                    except StaleElementReferenceException:
+                        continue
+                    except Exception:
+                        continue
 
-                norm_text = self._normalize_text(text)
-                if not norm_text or norm_text in seen_norm:
-                    continue
+                    if not text:
+                        continue
 
-                seen_norm.add(norm_text)
-                snippet = self._shorten_text(text)
+                    norm_text = self._normalize_text(text)
+                    if not norm_text or norm_text in seen_norm:
+                        continue
 
-                if self._is_progress_text(norm_text):
-                    progress_snippets.append(snippet)
-                elif any(keyword in norm_text for keyword in SUCCESS_KEYWORDS):
-                    success_snippets.append(snippet)
+                    seen_norm.add(norm_text)
+                    snippet = self._shorten_text(text)
 
-        # Verifica body também
-        try:
-            body_text = self.driver.find_element(By.TAG_NAME, "body").text
-        except Exception:
-            body_text = ""
+                    if self._is_progress_text(norm_text):
+                        progress_snippets.append(snippet)
+                    elif self._has_success_partial(norm_text, SUCCESS_KEYWORDS):  # Partial match
+                        success_snippets.append(snippet)
 
-        if body_text:
-            norm_body = self._normalize_text(body_text)
-            if norm_body and norm_body not in seen_norm:
-                snippet = self._shorten_text(body_text)
-                if self._is_progress_text(norm_body):
-                    progress_snippets.append(snippet)
-                elif any(keyword in norm_body for keyword in SUCCESS_KEYWORDS):
-                    success_snippets.append(snippet)
+            # Verifica body também (fallback crítico)
+            try:
+                body_text = self.driver.find_element(By.TAG_NAME, "body").text
+                if body_text:
+                    norm_body = self._normalize_text(body_text)
+                    if norm_body and norm_body not in seen_norm:
+                        snippet = self._shorten_text(body_text)
+                        if self._is_progress_text(norm_body):
+                            progress_snippets.append(snippet)
+                        elif self._has_success_partial(norm_body, SUCCESS_KEYWORDS):
+                            success_snippets.append(snippet)
+            except Exception:
+                pass
 
-        return progress_snippets, success_snippets
+            return progress_snippets, success_snippets
 
     def wait_upload_completion(self, timeout: int = 300) -> bool:
         """
-        Espera o upload ser processado pelo TikTok.
+        Espera o upload ser processado pelo TikTok (fallback prioritário + stall 90%+).
 
         Args:
             timeout: Tempo máximo de espera em segundos
 
         Returns:
-            True se upload finalizou, False se timeout
+            True se upload finalizado, False se timeout
         """
         deadline = time.time() + max(timeout, 30)
         last_progress = ""
+        last_progress_time = time.time()
+        stall_threshold = 20  # Segundos sem mudança em 90%+ = sucesso
 
         while time.time() < deadline:
-            progress_snippets, success_snippets = self._scan_status_messages()
+            progress_snippets, success_snippets = self._scan_status_messages()  # Prioritário: texto sempre
+
+            if success_snippets:
+                self.log(f"ℹ️ Status após upload: {success_snippets[0]}")
+                self.log("✅ Upload finalizado")
+                return True
 
             if progress_snippets:
                 summary = "; ".join(progress_snippets[:2])
-                if summary != last_progress:
-                    self.log(f"⏳ Upload em andamento: {summary}")
-                    last_progress = summary
-                time.sleep(4)
+                current_time = time.time()
+                # Check stall para 90%+
+                if re.search(r"\b9\d{1,2}%", summary):  # >=90%
+                    if summary != last_progress:
+                        self.log(f"⏳ Upload em andamento: {summary}")
+                        last_progress = summary
+                        last_progress_time = current_time
+                    elif current_time - last_progress_time > stall_threshold:
+                        self.log(f"✅ Upload estagnado >{stall_threshold}s em 90%+ (assumindo sucesso: {summary})")
+                        return True
+                else:
+                    if summary != last_progress:
+                        self.log(f"⏳ Upload em andamento: {summary}")
+                        last_progress = summary
+                        last_progress_time = current_time
                 continue
 
-            if success_snippets and last_progress:
-                self.log(f"ℹ️ Status após upload: {success_snippets[0]}")
+            # UI Check: Elementos pós-upload (ex.: description field)
+            try:
+                wait = WebDriverWait(self.driver, 5)
+                post_ui_ec = [EC.presence_of_element_located(sel) for sel in POST_UPLOAD_SELECTORS]
+                post_elem = wait.until(EC.any_of(*post_ui_ec))
+                self.log(f"✅ UI pós-upload detectada: {post_elem.tag_name} (pronto para edição)")
+                return True
+            except TimeoutException:
+                pass
 
-            self.log("✅ Upload finalizado")
+            time.sleep(2)  # Sleep reduzido
+
+        # Scan final melhorado
+        self.log("⚠️ Timeout atingido; scan final para confirmação...")
+        _, success_snippets = self._scan_status_messages()
+        if success_snippets or self._has_success_partial(self.driver.find_element(By.TAG_NAME, "body").text, SUCCESS_KEYWORDS):
+            self.log(f"✅ Upload detectado no scan final")
             return True
 
         if last_progress:
             self.log(f"⚠️ Timeout aguardando upload (último status: {last_progress})")
         else:
-            self.log("⚠️ Timeout aguardando upload finalizar")
+            self.log("⚠️ Timeout aguardando upload finalizar (nenhum progresso detectado)")
         return False
 
     def send_video_file(self, video_path: str, retry: bool = True) -> bool:
         """
-        Envia o arquivo de vídeo para o TikTok.
+        Envia o arquivo de vídeo para o TikTok (com backoff simples).
 
         Args:
             video_path: Caminho absoluto ou relativo do vídeo
@@ -469,20 +471,22 @@ class VideoUploadModule:
         Returns:
             True se enviou com sucesso, False caso contrário
         """
-        # Valida arquivo antes de enviar
-        if not self.validate_video_file(video_path):
+        # Valida arquivo antes de enviar (agora com tuple)
+        valid, msg = self.validate_video_file(video_path)
+        if not valid:
+            self.log(f"❌ {msg}")
             return False
 
         abs_path = os.path.abspath(video_path)
         attempts = 2 if retry else 1
-        sent = False
+        backoff = [2, 4]  # Sleeps crescentes
 
         for attempt in range(attempts):
             upload_input = self._resolve_file_input(timeout=WAIT_MED)
             if not upload_input:
-                if attempt == 0:
-                    self.log("⚠️ Input de upload não encontrado; tentando novamente...")
-                    time.sleep(2)
+                if attempt < attempts - 1:
+                    self.log(f"⚠️ Input não encontrado; retry em {backoff[attempt]}s...")
+                    time.sleep(backoff[attempt])
                     continue
                 self.log("❌ Input de arquivo não encontrado")
                 return False
@@ -509,20 +513,18 @@ class VideoUploadModule:
                 # Envia arquivo
                 upload_input.send_keys(abs_path)
                 self.log(f"⬆️ Arquivo enviado: {os.path.basename(abs_path)}")
-                sent = True
                 break
 
             except Exception as e:
                 self.log(f"⚠️ Falha ao enviar arquivo (tentativa {attempt + 1}): {e}")
                 self._file_input_context = None
-                time.sleep(2)
+                if attempt < attempts - 1:
+                    time.sleep(backoff[attempt])
             finally:
-                try:
-                    self.driver.switch_to.default_content()
-                except Exception:
+                with self._frame_context(None):  # Reset via context
                     pass
 
-        if not sent:
+        else:  # No break: falhou todas tentativas
             self.log("❌ Falha ao enviar arquivo de vídeo")
             return False
 
@@ -540,10 +542,10 @@ class VideoUploadModule:
             self.log("⚠️ Timeout aguardando processamento inicial")
             return False
 
-        time.sleep(3)
+        time.sleep(2)  # Reduzido de 3s
 
-        # Aguarda upload completar
-        if not self.wait_upload_completion(timeout=240):
+        # Aguarda upload completar (agora com UI check)
+        if not self.wait_upload_completion(timeout=300):
             return False
 
         return True

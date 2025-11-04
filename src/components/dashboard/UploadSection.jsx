@@ -1,9 +1,10 @@
 import { Upload, X, AlertCircle } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Button from '../common/Button';
 import Input from '../common/Input';
 import { useAccounts } from '@/hooks/useAccounts';
 import { useUploadVideo } from '@/hooks/useScheduledVideos';
+import { useSelectedAccount } from '@/contexts/SelectedAccountContext';
 
 export default function UploadSection() {
   const [files, setFiles] = useState([]);
@@ -20,6 +21,29 @@ export default function UploadSection() {
 
   const { data: accounts } = useAccounts();
   const uploadMutation = useUploadVideo();
+  const { selectedAccountId, setSelectedAccountId } = useSelectedAccount();
+
+  useEffect(() => {
+    if (!accounts || accounts.length === 0) return;
+
+    if (selectedAccountId) {
+      const matchById = accounts.find(
+        (account) => String(account.id) === String(selectedAccountId),
+      );
+      if (matchById && matchById.account_name !== selectedAccount) {
+        setSelectedAccount(matchById.account_name);
+      }
+      return;
+    }
+
+    if (!selectedAccount) {
+      const fallback = accounts.find((account) => account.is_active) || accounts[0];
+      if (fallback) {
+        setSelectedAccount(fallback.account_name);
+        setSelectedAccountId(String(fallback.id));
+      }
+    }
+  }, [accounts, selectedAccountId, selectedAccount, setSelectedAccountId]);
 
   const handleDrag = (e) => {
     e.preventDefault();
@@ -51,6 +75,14 @@ export default function UploadSection() {
 
   const removeFile = (index) => {
     setFiles(prevFiles => prevFiles.filter((_, i) => i !== index));
+  };
+
+  const handleAccountChange = (value) => {
+    setSelectedAccount(value);
+    const account = accounts?.find((item) => item.account_name === value);
+    if (account) {
+      setSelectedAccountId(String(account.id));
+    }
   };
 
   const handleSubmit = async (e) => {
@@ -127,7 +159,6 @@ export default function UploadSection() {
       setFilesMetadata({});
       setDescription('');
       setHashtags('');
-      setSelectedAccount('');
       setScheduleTime('');
       setError('');
     } else {
@@ -299,7 +330,7 @@ export default function UploadSection() {
             </label>
             <select
               value={selectedAccount}
-              onChange={(e) => setSelectedAccount(e.target.value)}
+              onChange={(e) => handleAccountChange(e.target.value)}
               className="w-full h-10 px-4 bg-background border border-border rounded-lg text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
               required
             >
