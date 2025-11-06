@@ -1336,7 +1336,7 @@ export default function Maintenance() {
           </Card>
 
           {/* Atualização do Sistema */}
-          <Card title="🔄 Atualizar Sistema (Recomendado)">
+          <Card title="🔄 Atualizar Sistema (Fluxo 2025)">
             <div className="mb-4 rounded-lg border border-indigo-400/70 bg-indigo-50 px-4 py-3 text-sm text-indigo-800 shadow-sm dark:border-indigo-300/40 dark:bg-indigo-900/40 dark:text-indigo-100">
               <p className="font-semibold">Novo fluxo de atualização disponível!</p>
               <p className="mt-1 text-xs">
@@ -1407,7 +1407,7 @@ export default function Maintenance() {
                   className="bg-blue-600 hover:bg-blue-700"
                 >
                   <Download className="w-4 h-4 mr-2" />
-                  {loading ? 'Atualizando...' : 'Atualizar Sistema'}
+                  {loading ? 'Aplicando atualização...' : 'Atualizar Sistema (novo fluxo)'}
                 </Button>
 
                 <Button
