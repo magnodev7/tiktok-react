@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Server,
   GitBranch,
@@ -11,11 +11,15 @@ import {
   CheckCircle,
   Clock,
   FileText,
+  Archive,
+  UploadCloud,
+  Trash2,
 } from 'lucide-react';
 import Card from '@/components/common/Card';
 import Button from '@/components/common/Button';
 import { useAuth } from '@/contexts/AuthContext';
 import api from '@/api/client';
+import { restoreBackup, fetchRestoreStatus, triggerUpdate, fetchUpdateStatus } from '@/services/api/maintenance';
 
 export default function Maintenance() {
   const { user } = useAuth();
@@ -37,6 +41,19 @@ export default function Maintenance() {
   const [editingGitUrl, setEditingGitUrl] = useState(false);
   const [newGitUrl, setNewGitUrl] = useState('');
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [backups, setBackups] = useState([]);
+  const [backupsLoading, setBackupsLoading] = useState(false);
+  const [creatingBackup, setCreatingBackup] = useState(false);
+  const [restoreLoading, setRestoreLoading] = useState(false);
+  const [restoreSteps, setRestoreSteps] = useState([]);
+  const [selectedBackupFile, setSelectedBackupFile] = useState(null);
+  const [restoreJob, setRestoreJob] = useState(null);
+  const [restoreStatus, setRestoreStatus] = useState(null);
+  const [selectedUpdateRef, setSelectedUpdateRef] = useState('');
+  const [selectedUpdateRemote, setSelectedUpdateRemote] = useState('');
+  const [updateJob, setUpdateJob] = useState(null);
+  const [updateStatus, setUpdateStatus] = useState(null);
+  const fileInputRef = useRef(null);
 
   // Verificar se é admin
   useEffect(() => {
@@ -46,54 +63,24 @@ export default function Maintenance() {
     }
   }, [user]);
 
-  // Carregar status dos serviços ao montar
   useEffect(() => {
-    if (activeTab === 'services') {
-      loadServiceStatus();
-    }
-  }, [activeTab]);
-
-  // Auto-refresh do status dos serviços
-  useEffect(() => {
-    if (activeTab === 'services' && autoRefresh) {
-      const interval = setInterval(() => {
-        loadServiceStatus();
-      }, 3000); // Atualiza a cada 3 segundos
-
-      return () => clearInterval(interval);
-    }
-  }, [activeTab, autoRefresh]);
-
-  // Carregar status do git ao mudar para aba git
-  useEffect(() => {
-    if (activeTab === 'git') {
-      loadGitStatus();
-      loadGitLog();
-      loadGitConfig();
-      loadBranches(false);
-    }
-  }, [activeTab]);
-
-  useEffect(() => {
-    if (!selectedBranch && gitStatus?.branch) {
-      setSelectedBranch(gitStatus.branch);
-    }
-  }, [gitStatus, selectedBranch]);
-
-  // Carregar logs ao mudar de serviço
-  useEffect(() => {
-    if (activeTab === 'logs') {
-      loadLogs();
-    }
-  }, [activeTab, selectedLogService]);
-
-  useEffect(() => {
-    if (activeTab === 'update') {
-      loadBranches();
-    }
-  }, [activeTab]);
-
-  const loadServiceStatus = async () => {
+    const loadInitialUpdateStatus = async () => {
+      try {
+        const response = await fetchUpdateStatus();
+        if (response?.status) {
+          setUpdateStatus(response.status);
+          setUpdateLog(response.status.steps || []);
+          if (!response.status.completed && response.status.state !== 'failed') {
+            setUpdateJob(response.status);
+          }
+        }
+      } catch (error) {
+        console.error('Erro ao carregar status de atualização:', error);
+      }
+    };
+    loadInitialUpdateStatus();
+  }, []);
+  const loadServiceStatus = useCallback(async () => {
     try {
       const response = await api.get('/api/maintenance/service/status');
       console.log('[Maintenance] Service status response:', response.data);
@@ -116,9 +103,9 @@ export default function Maintenance() {
       console.error('Erro ao carregar status dos serviços:', error);
       setServiceStatus({ services: {}, error: error.message });
     }
-  };
+  }, []);
 
-  const loadGitStatus = async () => {
+  const loadGitStatus = useCallback(async () => {
     try {
       const response = await api.get('/api/maintenance/git/status');
       console.log('[Maintenance] Git status response:', response.data);
@@ -132,9 +119,9 @@ export default function Maintenance() {
     } catch (error) {
       console.error('Erro ao carregar status do git:', error);
     }
-  };
+  }, []);
 
-  const loadGitLog = async () => {
+  const loadGitLog = useCallback(async () => {
     try {
       const response = await api.get('/api/maintenance/git/log?limit=10');
       console.log('[Maintenance] Git log response:', response.data);
@@ -148,9 +135,9 @@ export default function Maintenance() {
     } catch (error) {
       console.error('Erro ao carregar log do git:', error);
     }
-  };
+  }, []);
 
-  const loadGitConfig = async () => {
+  const loadGitConfig = useCallback(async () => {
     try {
       const response = await api.get('/api/maintenance/git/config');
       console.log('[Maintenance] Git config response:', response.data);
@@ -164,9 +151,34 @@ export default function Maintenance() {
     } catch (error) {
       console.error('Erro ao carregar configuração do git:', error);
     }
-  };
+  }, []);
 
-  const loadBranches = async (refresh = false) => {
+  const computeRemoteFromRef = useCallback(
+    (ref, data = null) => {
+      const source = data || branchData;
+      if (!ref || !source) {
+        return '';
+      }
+      const remotesList = source.remotes || [];
+      const remoteMatch = remotesList.find((item) => item.name === ref);
+      if (!remoteMatch) {
+        const slashIndex = ref.indexOf('/');
+        if (slashIndex > 0) {
+          const remoteCandidate = ref.slice(0, slashIndex);
+          const existsRemote = remotesList.some((item) => item.name.startsWith(`${remoteCandidate}/`));
+          if (existsRemote) {
+            return remoteCandidate;
+          }
+        }
+        return '';
+      }
+      const slashIndex = ref.indexOf('/');
+      return slashIndex > 0 ? ref.slice(0, slashIndex) : ref;
+    },
+    [branchData],
+  );
+
+  const loadBranches = useCallback(async (refresh = false) => {
     try {
       const url = refresh ? '/api/maintenance/git/branches?refresh=true' : '/api/maintenance/git/branches';
       const response = await api.get(url);
@@ -175,20 +187,31 @@ export default function Maintenance() {
       const payload = response.data?.success === true ? response.data.data : response.data;
       if (!payload) return;
 
-      setBranchData({
+      const branchPayload = {
         locals: payload.locals || [],
         remotes: payload.remotes || [],
         current_branch: payload.current_branch || '',
-      });
+      };
+
+      setBranchData(branchPayload);
 
       if (!selectedBranch) {
-        setSelectedBranch(payload.current_branch || '');
+        setSelectedBranch(branchPayload.current_branch || '');
       }
+
+      let nextUpdateRef = selectedUpdateRef;
+      if (!nextUpdateRef) {
+        const current = branchPayload.current_branch || '';
+        const originRef = branchPayload.remotes?.find((item) => item.name === `origin/${current}`);
+        nextUpdateRef = originRef ? originRef.name : current;
+        setSelectedUpdateRef(nextUpdateRef);
+      }
+      setSelectedUpdateRemote(computeRemoteFromRef(nextUpdateRef, branchPayload));
     } catch (error) {
       console.error('Erro ao carregar branches do git:', error);
       alert('❌ Erro ao carregar branches do repositório');
     }
-  };
+  }, [selectedBranch, selectedUpdateRef, computeRemoteFromRef]);
 
   const saveGitConfig = async () => {
     if (!newGitUrl.trim()) {
@@ -221,7 +244,7 @@ export default function Maintenance() {
     }
   };
 
-  const loadLogs = async () => {
+  const loadLogs = useCallback(async () => {
     try {
       const response = await api.get(`/api/maintenance/logs/tail?service=${selectedLogService}&lines=100`);
       console.log('[Maintenance] Logs response:', response.data);
@@ -232,7 +255,151 @@ export default function Maintenance() {
       console.error('Erro ao carregar logs:', error);
       setLogs('Erro ao carregar logs');
     }
-  };
+  }, [selectedLogService]);
+
+  const loadBackups = useCallback(async () => {
+    setBackupsLoading(true);
+    try {
+      const response = await api.get('/api/maintenance/backup/list');
+      console.log('[Maintenance] Backup list response:', response.data);
+      const payload = response.data?.success === true ? response.data.data : response.data;
+      setBackups(payload?.backups || []);
+    } catch (error) {
+      console.error('Erro ao carregar backups:', error);
+      alert('❌ Erro ao carregar lista de backups');
+    } finally {
+      setBackupsLoading(false);
+    }
+  }, []);
+
+  const pollRestoreStatus = useCallback(
+    async (jobId) => {
+      try {
+        const response = await fetchRestoreStatus(jobId);
+        const statusData = response.status;
+        setRestoreStatus(statusData);
+        if (statusData?.steps) {
+          setRestoreSteps(statusData.steps);
+        }
+        if (statusData?.completed || statusData?.state === 'failed') {
+          setRestoreJob(null);
+          if (Array.isArray(statusData?.errors) && statusData.errors.length > 0) {
+            alert(`⚠️ Restauração finalizada com erros:\n${statusData.errors.join('\n')}`);
+          } else {
+            alert('✅ Restauração concluída com sucesso (serviços reiniciados em background).');
+          }
+        }
+      } catch (error) {
+        console.error('Erro ao consultar status da restauração:', error);
+      }
+    },
+    []
+  );
+
+  const pollUpdateStatus = useCallback(
+    async (jobId) => {
+      try {
+        const response = await fetchUpdateStatus(jobId);
+        const statusData = response.status;
+        if (statusData) {
+          setUpdateStatus(statusData);
+          setUpdateLog(statusData.steps || []);
+        }
+      } catch (error) {
+        console.error('Erro ao consultar status da atualização:', error);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (activeTab === 'services') {
+      loadServiceStatus();
+    }
+  }, [activeTab, loadServiceStatus]);
+
+  useEffect(() => {
+    if (activeTab === 'services' && autoRefresh) {
+      const interval = setInterval(() => {
+        loadServiceStatus();
+      }, 3000); // Atualiza a cada 3 segundos
+
+      return () => clearInterval(interval);
+    }
+  }, [activeTab, autoRefresh, loadServiceStatus]);
+
+  useEffect(() => {
+    if (activeTab === 'git') {
+      loadGitStatus();
+      loadGitLog();
+      loadGitConfig();
+      loadBranches(false);
+    }
+  }, [activeTab, loadBranches, loadGitConfig, loadGitLog, loadGitStatus]);
+
+  useEffect(() => {
+    if (!selectedBranch && gitStatus?.branch) {
+      setSelectedBranch(gitStatus.branch);
+    }
+  }, [gitStatus, selectedBranch]);
+
+  useEffect(() => {
+    if (activeTab === 'logs') {
+      loadLogs();
+    }
+  }, [activeTab, loadLogs]);
+
+  useEffect(() => {
+    if (activeTab === 'update') {
+      loadBranches();
+    }
+  }, [activeTab, loadBranches]);
+
+  useEffect(() => {
+    if (activeTab === 'backups') {
+      loadBackups();
+    }
+  }, [activeTab, loadBackups]);
+
+  useEffect(() => {
+    if (!restoreJob) {
+      return undefined;
+    }
+
+    const fetchStatus = () => pollRestoreStatus(restoreJob.job_id || restoreJob);
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 5000);
+    return () => clearInterval(interval);
+  }, [restoreJob, pollRestoreStatus]);
+
+  useEffect(() => {
+    if (!updateJob) {
+      return undefined;
+    }
+
+    const fetchStatus = () => pollUpdateStatus(updateJob.job_id || updateJob);
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 5000);
+    return () => clearInterval(interval);
+  }, [updateJob, pollUpdateStatus]);
+
+  useEffect(() => {
+    if (!updateStatus || !updateJob) {
+      return;
+    }
+
+    if (updateStatus.state === 'failed') {
+      const msg = Array.isArray(updateStatus.errors) && updateStatus.errors.length
+        ? updateStatus.errors.join('\n')
+        : 'Atualização falhou.';
+      alert(`❌ ${msg}`);
+      setUpdateJob(null);
+    } else if (updateStatus.state === 'waiting_restart') {
+      alert('✅ Atualização concluída. Reinício dos serviços agendado.');
+      setUpdateJob(null);
+      loadServiceStatus();
+    }
+  }, [updateStatus, updateJob, loadServiceStatus]);
 
   const handleBranchCheckout = async () => {
     if (!selectedBranch) {
@@ -298,53 +465,53 @@ export default function Maintenance() {
   };
 
   const handleUpdate = async (force = false) => {
+    const refDescription = selectedUpdateRef ? `\\nReferência selecionada: ${selectedUpdateRef}` : '';
     const confirmMessage = force
-      ? '⚠️ ATENÇÃO: Mudanças locais serão DESCARTADAS!\n\nDeseja continuar?'
-      : '🔄 Atualizar o sistema do GitHub?\n\nIsso vai:\n- Fazer git pull\n- Detectar mudanças\n- Buildar frontend (se necessário)\n- Reiniciar backend (se necessário)\n\n✅ Seus dados (vídeos, contas, etc) serão MANTIDOS';
+      ? `⚠️ ATENÇÃO: Mudanças locais serão DESCARTADAS!${refDescription}\\n\\nO processo será executado em background:\\n- git pull (forçado)\\n- npm run build\\n- manage.sh all restart\\n\\nDeseja continuar?`
+      : `🔄 Atualizar o sistema do GitHub?${refDescription}\\n\\nIsso vai:\\n- Fazer git pull na referência selecionada\\n- Detectar arquivos alterados\\n- Executar npm run build\\n- Reiniciar os serviços em background\\n\\n✅ Seus dados (vídeos, contas, etc) serão MANTIDOS`;
 
     if (!confirm(confirmMessage)) {
       return;
     }
 
     setLoading(true);
-    setUpdateLog([]);
     setActiveTab('update');
+    setUpdateLog([]);
+    setUpdateStatus(null);
 
     try {
-      const response = await api.post('/api/maintenance/update', { force });
-      if (response.data?.success) {
-        const data = response.data.data;
-        setUpdateLog(data.steps || []);
-
-        if (data.completed) {
-          alert('✅ Sistema atualizado com sucesso!');
-        } else {
-          alert(`⚠️ Atualização completada com erros:\n${data.errors.join('\n')}`);
-        }
+      const payload = await triggerUpdate({
+        force,
+        target_ref: selectedUpdateRef || undefined,
+        remote: selectedUpdateRemote || undefined,
+      });
+      const job = payload?.status || payload;
+      if (job) {
+        setUpdateJob(job);
+        setUpdateStatus(job);
+        setUpdateLog(job.steps || []);
       }
+      alert(payload?.message || 'Atualização agendada. Acompanhe o status abaixo.');
+      setLoading(false);
     } catch (error) {
       console.error('[Maintenance] Update error:', error);
       const apiError = error.response?.data;
-      const message = apiError?.message || error.message;
+      const message = apiError?.message || error.message || 'Erro na atualização';
 
-      // Se for erro de mudanças locais, mostrar opção de forçar
       if (message.includes('alterações locais') || message.includes('uncommitted changes')) {
         const forceUpdate = confirm(
-          `❌ ${message}\n\n` +
-          '💡 Deseja FORÇAR a atualização?\n' +
-          '(Isso vai descartar as mudanças locais)'
+          `❌ ${message}\\n\\n💡 Deseja FORÇAR a atualização?\\n(Isso vai descartar as mudanças locais)`
         );
 
         if (forceUpdate) {
-          // Chamar novamente com force=true
-          handleUpdate(true);
+          setLoading(false);
+          await handleUpdate(true);
           return;
         }
       }
 
       alert(`❌ Erro na atualização: ${message}`);
       setUpdateLog([{ step: 'error', success: false, error: message }]);
-    } finally {
       setLoading(false);
     }
   };
@@ -413,8 +580,152 @@ export default function Maintenance() {
     }
   };
 
+  const handleCreateBackup = async () => {
+    if (!confirm('Criar backup do sistema (exceto vídeos)? Perfis e configurações serão incluídos.')) {
+      return;
+    }
+
+    setCreatingBackup(true);
+    try {
+      const response = await api.post('/api/maintenance/backup/create');
+      console.log('[Maintenance] Backup create response:', response.data);
+      const payload = response.data?.success === true ? response.data.data : response.data;
+      alert(response.data?.message || '✅ Backup criado com sucesso!');
+      if (payload?.filename) {
+        setRestoreSteps([{
+          step: 'backup_create',
+          success: true,
+          message: `Backup gerado: ${payload.filename}`,
+        }]);
+      }
+      await loadBackups();
+    } catch (error) {
+      console.error('Erro ao criar backup:', error);
+      const message = error.response?.data?.message || error.message;
+      alert(`❌ Falha ao criar backup: ${message}`);
+    } finally {
+      setCreatingBackup(false);
+    }
+  };
+
+  const handleDownloadBackup = async (filename) => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      if (!token) {
+        alert('Sessão expirada. Faça login novamente.');
+        window.location.href = '/login';
+        return;
+      }
+
+      const baseURL = (import.meta.env.VITE_API_URL || window.location.origin).replace(/\/$/, '');
+      const url = `${baseURL}/api/maintenance/backup/download?file=${encodeURIComponent(filename)}`;
+
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `HTTP ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get('content-disposition');
+      let suggestedName = filename;
+      if (disposition) {
+        const match = disposition.match(/filename="?([^"]+)"?/);
+        if (match?.[1]) {
+          suggestedName = match[1];
+        }
+      }
+
+      const objectUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = suggestedName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      console.error('Erro ao baixar backup:', error);
+      const message = error.message || 'Erro desconhecido';
+      alert(`❌ Falha ao baixar backup: ${message}`);
+    }
+  };
+
+  const handleRestoreBackup = async (event) => {
+    event.preventDefault();
+    if (!selectedBackupFile) {
+      alert('Selecione um arquivo de backup (.tar.gz)');
+      return;
+    }
+
+    if (!confirm('Restaurar backup selecionado? Isso substituirá arquivos do sistema.')) {
+      return;
+    }
+
+    setRestoreLoading(true);
+    setRestoreSteps([]);
+
+    try {
+      const payload = await restoreBackup(selectedBackupFile);
+      console.log('[Maintenance] Backup restore response:', payload);
+      const job = payload?.status || payload;
+      setRestoreJob(job);
+      setRestoreSteps(job?.steps || []);
+      setRestoreStatus(job);
+      alert(payload?.message || '🔄 Restauração iniciada. Acompanhe o progresso abaixo.');
+      await loadBackups();
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+      setSelectedBackupFile(null);
+    } catch (error) {
+      console.error('Erro ao restaurar backup:', error);
+      const message = error.response?.data?.message || error.message;
+      setRestoreSteps([{ step: 'error', success: false, error: message }]);
+      alert(`❌ Falha na restauração: ${message}`);
+    } finally {
+      setRestoreLoading(false);
+    }
+  };
+
+  const handleDeleteBackup = async (filename) => {
+    if (!confirm(`Excluir backup "${filename}"? Esta ação não pode ser desfeita.`)) {
+      return;
+    }
+
+    try {
+      await api.delete('/api/maintenance/backup/delete', { params: { file: filename } });
+      alert('✅ Backup removido com sucesso.');
+      await loadBackups();
+    } catch (error) {
+      console.error('Erro ao excluir backup:', error);
+      const message = error.response?.data?.message || error.message;
+      alert(`❌ Falha ao excluir backup: ${message}`);
+    }
+  };
+
   const formatTimestamp = (timestamp) => {
     return new Date(timestamp * 1000).toLocaleString('pt-BR');
+  };
+
+  const formatBytes = (bytes) => {
+    const value = Number(bytes);
+    if (!Number.isFinite(value)) return '0 B';
+    if (value === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let idx = 0;
+    let size = value;
+    while (size >= 1024 && idx < units.length - 1) {
+      size /= 1024;
+      idx += 1;
+    }
+    const formatted = size >= 10 ? size.toFixed(0) : size.toFixed(1);
+    return `${formatted} ${units[idx]}`;
   };
 
   const getStatusBadge = (service) => {
@@ -465,6 +776,7 @@ export default function Maintenance() {
     { id: 'services', label: 'Serviços', icon: Server },
     { id: 'git', label: 'Git Status', icon: GitBranch },
     { id: 'update', label: 'Atualizar Sistema', icon: Download },
+     { id: 'backups', label: 'Backups', icon: Archive },
     { id: 'logs', label: 'Logs', icon: FileText },
   ];
 
@@ -861,7 +1173,7 @@ export default function Maintenance() {
 
           <Card title="Histórico de Commits">
             <div className="space-y-3">
-              {gitLog.map((commit, index) => (
+              {gitLog.map((commit) => (
                 <div
                   key={commit.full_hash}
                   className="border-l-2 border-blue-500 pl-4 py-2"
@@ -1036,6 +1348,35 @@ export default function Maintenance() {
                 <li>✅ Mantém histórico de posts</li>
               </ul>
 
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Selecionar branch/tag para atualizar
+                </label>
+                <select
+                  value={selectedUpdateRef}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setSelectedUpdateRef(value);
+                    setSelectedUpdateRemote(computeRemoteFromRef(value));
+                  }}
+                  className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-md text-sm"
+                >
+                  <option value="">
+                    Usar upstream configurado ({branchData.current_branch || 'desconhecido'})
+                  </option>
+                  {(branchData.remotes || []).map((remote) => (
+                    <option key={`remote-${remote.name}`} value={remote.name}>
+                      {remote.name}
+                    </option>
+                  ))}
+                  {(branchData.locals || []).map((local) => (
+                    <option key={`local-${local.name}`} value={local.name}>
+                      {local.name} (local)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div className="flex gap-3">
                 <Button
                   onClick={() => handleUpdate(false)}
@@ -1099,44 +1440,266 @@ export default function Maintenance() {
           </Card>
 
           {/* Log de Atualização/Reinstalação */}
-          {updateLog.length > 0 && (
+          {(updateLog.length > 0 || updateStatus) && (
             <Card title="Log de Atualização">
-              <div className="space-y-2">
-                {updateLog.map((step, index) => (
-                  <div
-                    key={index}
-                    className="flex items-start gap-2 text-sm"
-                  >
-                    {step.success ? (
-                      <CheckCircle className="w-4 h-4 text-green-600 flex-shrink-0 mt-0.5" />
-                    ) : (
-                      <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+              <div className="space-y-3">
+                {updateStatus && (
+                  <div className="text-xs text-gray-500 dark:text-gray-400 space-y-1">
+                    <p>
+                      Estado:{' '}
+                      <span className="font-semibold text-gray-700 dark:text-gray-200">
+                        {updateStatus.state || 'desconhecido'}
+                      </span>
+                    </p>
+                    <p>
+                      Job ID:{' '}
+                      <code className="font-mono text-blue-600 dark:text-blue-300">
+                        {updateStatus.job_id}
+                      </code>
+                    </p>
+                    {updateStatus.started_at && (
+                      <p>Iniciado: {new Date(updateStatus.started_at).toLocaleString('pt-BR')}</p>
                     )}
-                    <div className="flex-1">
-                      <p className="font-medium text-gray-900 dark:text-white">
-                        {step.step}
+                    {updateStatus.finished_at && (
+                      <p>Finalizado: {new Date(updateStatus.finished_at).toLocaleString('pt-BR')}</p>
+                    )}
+                    {Array.isArray(updateStatus.errors) && updateStatus.errors.length > 0 && (
+                      <div className="text-red-600 dark:text-red-400">
+                        <p>Erros:</p>
+                        <ul className="list-disc pl-6">
+                          {updateStatus.errors.map((err, idx) => (
+                            <li key={idx}>{err}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {updateLog.length > 0 ? (
+                  updateLog.map((step, index) => (
+                    <div key={index} className="flex items-start gap-2 text-sm">
+                      {step.success ? (
+                        <CheckCircle className="w-4 h-4 text-green-600 flex-shrink-0 mt-0.5" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                      )}
+                      <div className="flex-1">
+                        <p className="font-medium text-gray-900 dark:text-white">
+                          {step.step}
+                        </p>
+                        {step.message && (
+                          <p className="text-gray-600 dark:text-gray-400 text-xs">
+                            {step.message}
+                          </p>
+                        )}
+                        {step.output && (
+                          <pre className="text-xs text-gray-500 dark:text-gray-500 mt-1 whitespace-pre-wrap font-mono">
+                            {step.output}
+                          </pre>
+                        )}
+                        {step.error && (
+                          <p className="text-red-600 dark:text-red-400 text-xs mt-1">
+                            {step.error}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                    Nenhum passo registrado ainda. Aguarde alguns segundos e o status será atualizado.
+                  </p>
+                )}
+              </div>
+            </Card>
+          )}
+        </div>
+      )}
+
+      {/* Backups Tab */}
+      {activeTab === 'backups' && (
+        <div className="space-y-6">
+          <Card title="📦 Criar Backup do Sistema">
+            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div className="text-sm text-gray-600 dark:text-gray-400 space-y-1">
+                <p>
+                  Gera um arquivo <code>.tar.gz</code> com o código e configurações do projeto.
+                </p>
+                <p>
+                  A pasta <strong>videos</strong> é preservada (fora do backup). Perfis, configurações e demais arquivos serão incluídos.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  onClick={handleCreateBackup}
+                  disabled={creatingBackup}
+                  className="bg-blue-600 hover:bg-blue-700"
+                >
+                  <Archive className="w-4 h-4 mr-2" />
+                  {creatingBackup ? 'Gerando backup...' : 'Criar backup (.tar.gz)'}
+                </Button>
+                <Button
+                  onClick={loadBackups}
+                  variant="outline"
+                  disabled={backupsLoading}
+                >
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                  Atualizar lista
+                </Button>
+              </div>
+            </div>
+          </Card>
+
+          <Card title="📁 Backups Disponíveis">
+            {backupsLoading ? (
+              <p className="text-sm text-gray-500 dark:text-gray-400">Carregando backups...</p>
+            ) : backups.length === 0 ? (
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                Nenhum backup encontrado. Clique em &quot;Criar backup&quot; para gerar o primeiro.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {backups.map((backup) => (
+                  <div
+                    key={backup.filename}
+                    className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between rounded-lg border border-gray-200 dark:border-gray-700 p-4"
+                  >
+                    <div className="space-y-1">
+                      <p className="font-medium text-gray-900 dark:text-white">{backup.filename}</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        Criado em{' '}
+                        {backup.created_at
+                          ? new Date(backup.created_at).toLocaleString('pt-BR')
+                          : 'desconhecido'}
                       </p>
-                      {step.message && (
-                        <p className="text-gray-600 dark:text-gray-400 text-xs">
-                          {step.message}
-                        </p>
-                      )}
-                      {step.output && (
-                        <pre className="text-xs text-gray-500 dark:text-gray-500 mt-1 whitespace-pre-wrap font-mono">
-                          {step.output}
-                        </pre>
-                      )}
-                      {step.error && (
-                        <p className="text-red-600 dark:text-red-400 text-xs mt-1">
-                          {step.error}
-                        </p>
-                      )}
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm font-mono text-gray-600 dark:text-gray-300">
+                        {formatBytes(backup.size)}
+                      </span>
+                      <Button
+                        onClick={() => handleDownloadBackup(backup.filename)}
+                        variant="outline"
+                      >
+                        <Download className="w-4 h-4 mr-2" />
+                        Baixar
+                      </Button>
+                      <Button
+                        onClick={() => handleDeleteBackup(backup.filename)}
+                        variant="ghost"
+                        className="text-red-600 hover:text-red-700 dark:text-red-400"
+                      >
+                        <Trash2 className="w-4 h-4 mr-2" />
+                        Excluir
+                      </Button>
                     </div>
                   </div>
                 ))}
               </div>
-            </Card>
-          )}
+            )}
+          </Card>
+
+          <Card title="🔄 Restaurar Backup">
+            <form onSubmit={handleRestoreBackup} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Selecionar arquivo (.tar.gz)
+                </label>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".tar.gz,application/gzip"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    setSelectedBackupFile(file || null);
+                  }}
+                  className="w-full text-sm text-gray-600 dark:text-gray-300 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 dark:file:bg-blue-900/30 dark:file:text-blue-200"
+                />
+                <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                  O processo executa automaticamente <code>npm run build</code> e{' '}
+                  <code>manage.sh all restart</code> após restaurar os arquivos. A pasta{' '}
+                  <code>videos</code> existente não é substituída.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  type="submit"
+                  disabled={!selectedBackupFile || restoreLoading}
+                  className="bg-green-600 hover:bg-green-700"
+                >
+                  <UploadCloud className="w-4 h-4 mr-2" />
+                  {restoreLoading ? 'Restaurando...' : 'Restaurar Backup'}
+                </Button>
+                {selectedBackupFile && (
+                  <span className="text-sm text-gray-600 dark:text-gray-300">
+                    Arquivo selecionado:{' '}
+                    <code className="font-mono text-blue-600 dark:text-blue-300">
+                      {selectedBackupFile.name}
+                    </code>
+                  </span>
+                )}
+              </div>
+            </form>
+
+            {restoreSteps.length > 0 && (
+              <div className="mt-6 bg-gray-100 dark:bg-gray-800 p-4 rounded-lg space-y-3">
+                <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                  Passos executados {restoreStatus?.state ? `(${restoreStatus.state})` : ''}
+                </h3>
+                {restoreStatus && (
+                  <div className="text-xs text-gray-500 dark:text-gray-400 space-y-1">
+                    <p>Job ID: <code className="font-mono text-blue-600 dark:text-blue-300">{restoreStatus.job_id}</code></p>
+                    {restoreStatus.started_at && <p>Iniciado: {new Date(restoreStatus.started_at).toLocaleString('pt-BR')}</p>}
+                    {restoreStatus.finished_at && <p>Finalizado: {new Date(restoreStatus.finished_at).toLocaleString('pt-BR')}</p>}
+                    {Array.isArray(restoreStatus.errors) && restoreStatus.errors.length > 0 && (
+                      <div className="text-red-600 dark:text-red-400">
+                        <p>Erros:</p>
+                        <ul className="list-disc pl-6">
+                          {restoreStatus.errors.map((err, idx) => (
+                            <li key={idx}>{err}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+                <div className="space-y-3">
+                  {restoreSteps.map((step, index) => {
+                    const success = step.success !== false;
+                    const title = step.message || step.step || `Passo ${index + 1}`;
+                    return (
+                      <div key={index} className="flex items-start gap-3">
+                        {success ? (
+                          <CheckCircle className="mt-1 w-5 h-5 text-green-600" />
+                        ) : (
+                          <AlertCircle className="mt-1 w-5 h-5 text-red-600" />
+                        )}
+                        <div className="flex-1">
+                          <p className="text-sm font-medium text-gray-800 dark:text-gray-200">
+                            {title}
+                          </p>
+                          {Array.isArray(step.restored_items) && step.restored_items.length > 0 && (
+                            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                              Itens restaurados: {step.restored_items.join(', ')}
+                            </p>
+                          )}
+                          {step.error && (
+                            <p className="mt-1 text-sm text-red-600 dark:text-red-400">{step.error}</p>
+                          )}
+                          {step.output && (
+                            <pre className="mt-2 max-h-48 overflow-auto rounded bg-black/80 p-2 text-xs text-green-200 whitespace-pre-wrap">
+                              {step.output}
+                            </pre>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </Card>
         </div>
       )}
 
