@@ -1375,6 +1375,12 @@ export default function Maintenance() {
                     </option>
                   ))}
                 </select>
+                {selectedUpdateRef && (
+                  <p className="mt-2 text-xs text-blue-600 dark:text-blue-400">
+                    Atualização preparada para <code className="font-mono">{selectedUpdateRef}</code>
+                    {selectedUpdateRemote ? ` (remote ${selectedUpdateRemote})` : ''}.
+                  </p>
+                )}
               </div>
 
               <div className="flex gap-3">
