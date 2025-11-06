@@ -19,6 +19,34 @@ from .schemas import APIResponse
 from .models import TikTokAccountCreate, TikTokAccountPublic, TikTokAccountUpdate
 from .utils import raise_http_error, success_response
 
+REQUIRED_COOKIE_NAMES = {
+    "sessionid",
+    "sessionid_ss",
+    "passport_csrf_token",
+    "passport_csrf_token_default",
+}
+
+
+def _ensure_required_cookies(cookies_list: List[Dict[str, Any]]) -> None:
+    """
+    Garante que a lista de cookies contenha as chaves essenciais para login.
+    Levanta HTTPException 400 caso algum cookie obrigatório esteja ausente.
+    """
+    present = {cookie.get("name") for cookie in cookies_list if isinstance(cookie, dict)}
+    missing = [name for name in REQUIRED_COOKIE_NAMES if name not in present]
+
+    if missing:
+        raise_http_error(
+            status.HTTP_400_BAD_REQUEST,
+            error="missing_required_cookies",
+            message=(
+                "Cookies essenciais ausentes. Certifique-se de exportar os cookies diretamente "
+                "de uma sessão autenticada do TikTok (faltando: "
+                + ", ".join(sorted(missing))
+                + ")."
+            ),
+        )
+
 
 router = APIRouter(prefix="/api/tiktok-accounts", tags=["tiktok-accounts"])
 
@@ -288,6 +316,8 @@ async def update_account_cookies(
                 error="missing_cookie_fields",
                 message=f"Cookie na posição {idx} não possui 'name' ou 'value'"
             )
+
+    _ensure_required_cookies(cookies_list)
 
     def _validate_storage(storage: Optional[Dict[str, Any]], storage_name: str) -> Optional[Dict[str, Any]]:
         if storage is None:

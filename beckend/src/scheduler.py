@@ -239,6 +239,11 @@ def _update_sidecars_for(video_path: str, new_hhmm: str, new_iso_utc: str, log):
     except Exception as e:
         log(f"⚠️ Falha ao atualizar meta legado: {e}")
 
+# Backward compatibility aliases (sem underscore)
+occupied_slots_for_date = _occupied_slots_for_date
+find_next_free_slot = _find_next_free_slot
+update_sidecars_for = _update_sidecars_for
+
 @dataclass
 class DueVideo:
     path: str

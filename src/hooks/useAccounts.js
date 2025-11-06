@@ -85,12 +85,30 @@ export function useUpdateCookies() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async ({ accountId, cookies }) => {
-      const { data, meta } = await apiClient.post(`/api/tiktok-accounts/${accountId}/update-cookies`, cookies);
+    mutationFn: async ({ accountId, cookies, payload }) => {
+      const body = payload ?? cookies;
+      if (!body) {
+        throw new Error('Payload de cookies não informado');
+      }
+      const { data, meta } = await apiClient.post(`/api/tiktok-accounts/${accountId}/update-cookies`, body);
       return { data, meta };
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['accounts'] });
+    },
+  });
+}
+
+export function useValidateCookies() {
+  return useMutation({
+    mutationFn: async ({ accountName, visible = false, testMode = false }) => {
+      const payload = {
+        account_name: accountName,
+        visible,
+        test_mode: testMode,
+      };
+      const { data, meta } = await apiClient.post('/api/cookies/validate', payload);
+      return { data, meta };
     },
   });
 }

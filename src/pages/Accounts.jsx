@@ -1,18 +1,20 @@
-import { Plus, Users as UsersIcon, AlertCircle, Edit2, Trash2, Power, PowerOff, Cookie } from 'lucide-react';
+import { Plus, Users as UsersIcon, AlertCircle, Edit2, Trash2, Power, PowerOff, Cookie, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 import Button from '@/components/common/Button';
 import Card from '@/components/common/Card';
 import Badge from '@/components/common/Badge';
 import Modal from '@/components/common/Modal';
 import Input from '@/components/common/Input';
-import { useAccounts, useAddAccount, useUpdateAccount, useDeleteAccount, useActivateAccount, useDeactivateAccount, useUpdateCookies } from '@/hooks/useAccounts';
+import { useAccounts, useAddAccount, useUpdateAccount, useDeleteAccount, useActivateAccount, useDeactivateAccount, useUpdateCookies, useValidateCookies } from '@/hooks/useAccounts';
 import Spinner from '@/components/common/Spinner';
 import CookiesImportModal from '@/components/accounts/CookiesImportModal';
+import { useToast } from '@/components/common/ToastContainer';
 
 export default function Accounts() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [currentEditId, setCurrentEditId] = useState(null);
   const [loadingAccountId, setLoadingAccountId] = useState(null);
+  const [validatingAccountId, setValidatingAccountId] = useState(null);
   const [isCookiesModalOpen, setIsCookiesModalOpen] = useState(false);
   const [selectedAccountForCookies, setSelectedAccountForCookies] = useState(null);
   const [newAccount, setNewAccount] = useState({
@@ -23,6 +25,8 @@ export default function Accounts() {
   });
   const [error, setError] = useState('');
 
+  const toast = useToast();
+
   const { data: accounts, isLoading } = useAccounts();
   const addAccountMutation = useAddAccount();
   const updateAccountMutation = useUpdateAccount();
@@ -30,6 +34,23 @@ export default function Accounts() {
   const activateAccountMutation = useActivateAccount();
   const deactivateAccountMutation = useDeactivateAccount();
   const updateCookiesMutation = useUpdateCookies();
+  const validateCookiesMutation = useValidateCookies();
+
+  const getErrorMessage = (err, fallback = 'Ocorreu um erro.') => {
+    if (!err) return fallback;
+    const payload = err.response?.data;
+    if (payload) {
+      if (typeof payload === 'string') return payload;
+      if (payload.message) return payload.message;
+      if (Array.isArray(payload.detail)) {
+        return payload.detail
+          .map(item => item?.msg || item?.message || JSON.stringify(item))
+          .join(' | ');
+      }
+      if (payload.detail) return payload.detail;
+    }
+    return err.message || fallback;
+  };
 
   const handleAddAccount = async () => {
     setError('');
@@ -47,8 +68,12 @@ export default function Accounts() {
       return;
     }
 
-    // Para edição, cookies não são obrigatórios
-    if (!currentEditId && !newAccount.cookies.trim() && !newAccount.password.trim()) {
+    const rawCookies = newAccount.cookies.trim();
+    const isEditing = Boolean(currentEditId);
+    const hasCookiesPayload = Boolean(rawCookies);
+
+    // Para criação, cookies ou senha são obrigatórios
+    if (!isEditing && !hasCookiesPayload && !newAccount.password.trim()) {
       setError('Você deve fornecer senha OU cookies');
       return;
     }
@@ -61,15 +86,15 @@ export default function Accounts() {
       };
 
       // Para criação, incluir account_name
-      if (!currentEditId) {
+      if (!isEditing) {
         data.account_name = cleanUsername;
         data.is_default = false;
       }
 
       // Parse dos cookies (se fornecidos)
-      if (newAccount.cookies.trim()) {
+      if (hasCookiesPayload) {
         try {
-          const parsedCookies = JSON.parse(newAccount.cookies.trim());
+          const parsedCookies = JSON.parse(rawCookies);
 
           // Se for array (formato Chrome DevTools), converter para dict
           if (Array.isArray(parsedCookies)) {
@@ -90,25 +115,40 @@ export default function Accounts() {
         }
       }
 
-      console.log('📤 Enviando para API:', currentEditId ? 'UPDATE' : 'CREATE', data);
+      console.log('📤 Enviando para API:', isEditing ? 'UPDATE' : 'CREATE', data);
 
-      // Chama a mutation apropriada
-      if (currentEditId) {
-        await updateAccountMutation.mutateAsync({ accountId: currentEditId, accountData: data });
-      } else {
-        await addAccountMutation.mutateAsync(data);
-      }
+      const mutationResult = isEditing
+        ? await updateAccountMutation.mutateAsync({ accountId: currentEditId, accountData: data })
+        : await addAccountMutation.mutateAsync(data);
+
+      const successMessage =
+        mutationResult?.meta?.message ||
+        (isEditing ? 'Conta atualizada com sucesso!' : 'Conta adicionada com sucesso!');
+      toast.success(successMessage);
 
       // Sucesso - fechar modal e limpar
       setIsModalOpen(false);
       setCurrentEditId(null);
       setNewAccount({ username: '', password: '', cookies: '', description: '' });
       setError('');
+
+      if (hasCookiesPayload) {
+        try {
+          const { meta } = await validateCookiesMutation.mutateAsync({
+            accountName: cleanUsername,
+            visible: false,
+            testMode: false,
+          });
+          toast.success(meta?.message || 'Cookies validados com sucesso!');
+        } catch (validationError) {
+          toast.error(getErrorMessage(validationError, 'Falha ao validar cookies.'));
+        }
+      }
     } catch (error) {
       console.error('❌ Erro completo:', error);
       console.error('❌ Resposta do backend:', error.response?.data);
 
-      let errorMessage = currentEditId ? 'Erro ao atualizar conta' : 'Erro ao adicionar conta';
+      let errorMessage = isEditing ? 'Erro ao atualizar conta' : 'Erro ao adicionar conta';
 
       if (error.response?.data) {
         const errorData = error.response.data;
@@ -128,6 +168,7 @@ export default function Accounts() {
       }
 
       setError(errorMessage);
+      toast.error(errorMessage);
     }
   };
 
@@ -175,6 +216,24 @@ export default function Accounts() {
     }
   };
 
+  const handleValidateCookies = async (account) => {
+    if (!account?.account_name) return;
+    setValidatingAccountId(account.id);
+    try {
+      const { meta } = await validateCookiesMutation.mutateAsync({
+        accountName: account.account_name,
+        visible: false,
+        testMode: false,
+      });
+      toast.success(meta?.message || 'Cookies validados com sucesso!');
+    } catch (error) {
+      console.error('Erro ao validar cookies:', error);
+      toast.error(getErrorMessage(error, 'Falha ao validar cookies.'));
+    } finally {
+      setValidatingAccountId(null);
+    }
+  };
+
   const handleOpenCookiesModal = (account) => {
     setSelectedAccountForCookies(account);
     setIsCookiesModalOpen(true);
@@ -185,16 +244,42 @@ export default function Accounts() {
     setSelectedAccountForCookies(null);
   };
 
-  const handleImportCookies = async (cookiesList) => {
+  const handleImportCookies = async (payload) => {
+    if (!selectedAccountForCookies) return;
+    const normalizedPayload = Array.isArray(payload)
+      ? { cookies: payload }
+      : payload;
+
     try {
       await updateCookiesMutation.mutateAsync({
         accountId: selectedAccountForCookies.id,
-        cookies: cookiesList
+        payload: normalizedPayload,
       });
+      toast.success(`Cookies atualizados com sucesso para '${selectedAccountForCookies.account_name}'`);
+
+      try {
+        setValidatingAccountId(selectedAccountForCookies.id);
+        const { meta } = await validateCookiesMutation.mutateAsync({
+          accountName: selectedAccountForCookies.account_name,
+          visible: false,
+          testMode: false,
+        });
+        toast.success(meta?.message || 'Cookies validados com sucesso!');
+      } catch (validationError) {
+        console.error('Erro ao validar cookies após atualização:', validationError);
+        if (validationError?.response?.status === 405) {
+          toast.info('Cookies salvos, mas o endpoint de validação não está disponível no backend.');
+        } else {
+          toast.error(getErrorMessage(validationError, 'Falha ao validar cookies.'));
+        }
+      } finally {
+        setValidatingAccountId(null);
+      }
+
       handleCloseCookiesModal();
-      alert(`Cookies atualizados com sucesso para '${selectedAccountForCookies.account_name}'`);
     } catch (error) {
       console.error('Erro ao atualizar cookies:', error);
+      toast.error(getErrorMessage(error, 'Erro ao atualizar cookies.'));
       throw error; // Re-throw para o modal mostrar o erro
     }
   };
@@ -381,6 +466,21 @@ export default function Accounts() {
                   className="w-full"
                 >
                   Atualizar Cookies
+                </Button>
+
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={ShieldCheck}
+                  onClick={() => handleValidateCookies(account)}
+                  loading={validatingAccountId === account.id && validateCookiesMutation.isPending}
+                  disabled={
+                    !account.cookies_data ||
+                    (validatingAccountId !== null && validatingAccountId !== account.id)
+                  }
+                  className="w-full"
+                >
+                  Validar Cookies
                 </Button>
 
                 {/* Botões Editar e Excluir */}
