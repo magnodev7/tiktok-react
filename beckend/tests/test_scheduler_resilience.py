@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo
 from src import scheduler
 from src import config
 from src import paths
+from src import driver as driver_module
+from src import cookies as cookies_module
 
 
 class FakeClock:
@@ -69,6 +71,27 @@ class SimulatedScheduler(scheduler.TikTokScheduler):
             p.unlink()
 
 
+class DummyDriver:
+    def __init__(self, profile_dir: str):
+        self._profile_dir = profile_dir
+        self._service_pid = 42
+        self.current_url = "https://www.tiktok.com/foryou"
+        self.closed = False
+
+    def quit(self):
+        self.closed = True
+
+
+def _patch_driver(monkeypatch, name: str, func):
+    monkeypatch.setattr(driver_module, name, func, raising=False)
+    monkeypatch.setattr(scheduler, name, func, raising=False)
+
+
+def _patch_cookies(monkeypatch, name: str, func):
+    monkeypatch.setattr(cookies_module, name, func, raising=False)
+    monkeypatch.setattr(scheduler, name, func, raising=False)
+
+
 @pytest.fixture()
 def scheduler_environment(monkeypatch, tmp_path):
     profiles = tmp_path / "profiles"
@@ -94,6 +117,12 @@ def scheduler_environment(monkeypatch, tmp_path):
     scheduler.SCHEDULES_JSON.write_text(json.dumps({"schedules": schedules}), encoding="utf-8")
     monkeypatch.setattr(scheduler, "SCHEDULES", schedules, raising=False)
     monkeypatch.setattr(config, "SCHEDULES", schedules, raising=False)
+
+    monkeypatch.setattr(scheduler.psutil, "process_iter", lambda *args, **kwargs: iter(()), raising=False)
+    monkeypatch.setattr(scheduler.time, "sleep", lambda *_: None, raising=False)
+    _patch_driver(monkeypatch, "get_fresh_driver", lambda *_, **__: DummyDriver(str(profiles / "default_runtime")))
+    _patch_driver(monkeypatch, "is_session_alive", lambda driver: False)
+    _patch_driver(monkeypatch, "release_driver_lock", lambda driver: None)
 
     return {
         "profiles": profiles,
@@ -309,3 +338,82 @@ def test_scheduler_reschedules_leftovers_with_burst_limit(monkeypatch, scheduler
         and (scheduler._read_json(json_meta) or {}).get("status") != "posted"
     ]
     assert not remaining_pending, "All videos should be posted after processing leftovers"
+
+
+def test_ensure_logged_respects_recent_failure(monkeypatch, scheduler_environment):
+    tz = ZoneInfo("America/Sao_Paulo")
+    clock = FakeClock(dt.datetime(2025, 1, 1, 12, 0, tzinfo=tz))
+    monkeypatch.setattr(scheduler, "_now_app", clock.now, raising=False)
+
+    logs: List[str] = []
+    _patch_cookies(monkeypatch, "cookies_marked_invalid", lambda account: False)
+
+    sched = scheduler.TikTokScheduler("login_account", logger=logs.append)
+    sched._last_cookie_failure_time = clock.now()
+
+    assert sched._ensure_logged() is False
+    assert any("Aguardando" in entry for entry in logs)
+
+
+def test_ensure_logged_detects_invalid_cookie_flag(monkeypatch, scheduler_environment):
+    tz = ZoneInfo("America/Sao_Paulo")
+    clock = FakeClock(dt.datetime(2025, 1, 1, 12, 0, tzinfo=tz))
+    monkeypatch.setattr(scheduler, "_now_app", clock.now, raising=False)
+
+    logs: List[str] = []
+    _patch_cookies(monkeypatch, "cookies_marked_invalid", lambda account: True)
+
+    sched = scheduler.TikTokScheduler("login_account", logger=logs.append)
+    assert sched._ensure_logged() is False
+
+
+def test_ensure_logged_success_resets_failure(monkeypatch, scheduler_environment):
+    tz = ZoneInfo("America/Sao_Paulo")
+    clock = FakeClock(dt.datetime(2025, 1, 1, 12, 0, tzinfo=tz))
+    monkeypatch.setattr(scheduler, "_now_app", clock.now, raising=False)
+
+    profile_dir = scheduler_environment["profiles"] / "login_account" / "runtime"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    dummy_driver = DummyDriver(str(profile_dir))
+    _patch_driver(monkeypatch, "get_fresh_driver", lambda *_, **__: dummy_driver)
+    _patch_driver(monkeypatch, "is_session_alive", lambda driver: False)
+    _patch_cookies(monkeypatch, "load_cookies_for_account", lambda driver, account: True)
+    _patch_cookies(monkeypatch, "cookies_marked_invalid", lambda account: False)
+
+    logs: List[str] = []
+    sched = scheduler.TikTokScheduler("login_account", logger=logs.append)
+    sched._last_cookie_failure_time = clock.now() - dt.timedelta(hours=1)
+
+    assert sched._ensure_logged() is True, f"Logs: {logs}"
+    assert sched._last_cookie_failure_time is None
+    assert sched.driver is dummy_driver
+
+
+def test_ensure_logged_failure_sets_timestamp(monkeypatch, scheduler_environment):
+    tz = ZoneInfo("America/Sao_Paulo")
+    clock = FakeClock(dt.datetime(2025, 1, 1, 12, 0, tzinfo=tz))
+    monkeypatch.setattr(scheduler, "_now_app", clock.now, raising=False)
+
+    profile_dir = scheduler_environment["profiles"] / "login_account" / "runtime_fail"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    dummy_driver = DummyDriver(str(profile_dir))
+    _patch_driver(monkeypatch, "get_fresh_driver", lambda *_, **__: dummy_driver)
+    _patch_driver(monkeypatch, "is_session_alive", lambda driver: False)
+
+    attempts = {"count": 0}
+
+    def fake_load(driver, account):
+        attempts["count"] += 1
+        return False
+
+    _patch_cookies(monkeypatch, "load_cookies_for_account", fake_load)
+    _patch_cookies(monkeypatch, "cookies_marked_invalid", lambda account: False)
+
+    logs: List[str] = []
+    sched = scheduler.TikTokScheduler("login_account", logger=logs.append)
+
+    assert sched._ensure_logged() is False
+    assert attempts["count"] >= 1
+    assert sched._last_cookie_failure_time is not None
