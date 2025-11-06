@@ -14,6 +14,7 @@ import {
   Archive,
   UploadCloud,
   Trash2,
+  Info,
 } from 'lucide-react';
 import Card from '@/components/common/Card';
 import Button from '@/components/common/Button';
@@ -1375,11 +1376,21 @@ export default function Maintenance() {
                     </option>
                   ))}
                 </select>
-                {selectedUpdateRef && (
-                  <p className="mt-2 text-xs text-blue-600 dark:text-blue-400">
-                    Atualização preparada para <code className="font-mono">{selectedUpdateRef}</code>
-                    {selectedUpdateRemote ? ` (remote ${selectedUpdateRemote})` : ''}.
-                  </p>
+                {selectedUpdateRef ? (
+                  <div className="mt-3 flex items-center gap-2 rounded-md border border-blue-400/60 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 dark:border-blue-400/40 dark:bg-blue-900/30 dark:text-blue-200">
+                    <Info className="h-4 w-4" />
+                    <span>
+                      Atualização preparada para{' '}
+                      <code className="font-mono text-sm">{selectedUpdateRef}</code>
+                      {selectedUpdateRemote
+                        ? ` (remote ${selectedUpdateRemote})`
+                        : ' (branch local)'}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="mt-3 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:border-gray-700 dark:bg-gray-800/60 dark:text-gray-300">
+                    Escolha um branch ou tag acima para preparar a próxima atualização.
+                  </div>
                 )}
               </div>
 
