@@ -151,7 +151,7 @@ def test_run_update_job_records_status(maintenance_env, monkeypatch, tmp_path):
 
     def fake_run_command(cmd, cwd=None, timeout=300):
         commands.append(tuple(cmd))
-        if cmd == ["git", "status", "--porcelain"]:
+        if cmd == ["git", "status", "--porcelain", "--untracked-files=no"]:
             return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
         if cmd[:2] == ["git", "fetch"]:
             return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
@@ -198,7 +198,7 @@ def test_run_update_job_records_status(maintenance_env, monkeypatch, tmp_path):
     assert restart_called["value"] is True
     web_index = maintenance.BACKEND_DIR / "web" / "index.html"
     assert web_index.exists()
-    assert ("git", "status", "--porcelain") in commands
+    assert ("git", "status", "--porcelain", "--untracked-files=no") in commands
     assert ("git", "fetch", "origin") in [cmd[:3] for cmd in commands if cmd[0] == "git" and cmd[1] == "fetch"]
     assert ("git", "diff", "--name-only", "HEAD@{1}", "HEAD") in commands
 
@@ -208,7 +208,7 @@ def test_run_update_job_checkout_remote_branch(maintenance_env, monkeypatch):
 
     def fake_run_command(cmd, cwd=None, timeout=300):
         commands.append(tuple(cmd))
-        if cmd == ["git", "status", "--porcelain"]:
+        if cmd == ["git", "status", "--porcelain", "--untracked-files=no"]:
             return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
         if cmd[:2] == ["git", "fetch"]:
             return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
@@ -253,5 +253,30 @@ def test_run_update_job_checkout_remote_branch(maintenance_env, monkeypatch):
     assert status_data["checked_out_branch"] == "release"
     checkout_steps = [step for step in status_data["steps"] if step["step"] in {"git_checkout_target", "git_checkout_track"}]
     assert checkout_steps and checkout_steps[-1]["step"] == "git_checkout_track"
+    assert ("git", "status", "--porcelain", "--untracked-files=no") in commands
     assert ("git", "checkout", "release") in commands
     assert ("git", "checkout", "-B", "release", "origin/release") in commands
+
+
+def test_run_update_job_force_stash_includes_untracked(maintenance_env, monkeypatch):
+    commands = []
+
+    def fake_run_command(cmd, cwd=None, timeout=300):
+        commands.append(tuple(cmd))
+        if cmd == ["git", "status", "--porcelain", "--untracked-files=no"]:
+            return {"success": True, "stdout": " M src/file.txt\n", "stderr": "", "returncode": 0}
+        if cmd[:2] == ["git", "fetch"]:
+            return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
+        if cmd[:2] == ["git", "pull"]:
+            return {"success": True, "stdout": "Updating 1..2", "stderr": "", "returncode": 0}
+        if cmd == ["git", "diff", "--name-only", "HEAD@{1}", "HEAD"]:
+            return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
+        return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
+
+    monkeypatch.setattr(maintenance, "_run_command", fake_run_command)
+    monkeypatch.setattr(maintenance, "_trigger_restart_async", lambda: None)
+
+    job_id = "force-job"
+    maintenance._run_update_job(job_id, {"force": True, "target_ref": None, "remote": "origin"})
+
+    assert ("git", "stash", "--include-untracked") in commands

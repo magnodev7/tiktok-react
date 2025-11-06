@@ -525,7 +525,7 @@ def _run_update_job(job_id: str, request_data: dict):
         _record_update_status(job_id, status)
 
     try:
-        status_result = _run_command(["git", "status", "--porcelain"], timeout=10)
+        status_result = _run_command(["git", "status", "--porcelain", "--untracked-files=no"], timeout=10)
         dirty = status_result["success"] and status_result["stdout"].strip()
         _append_step({
             "step": "git_status",
@@ -540,7 +540,7 @@ def _run_update_job(job_id: str, request_data: dict):
             return
 
         if dirty and req.force:
-            stash_result = _run_command(["git", "stash"], timeout=30)
+            stash_result = _run_command(["git", "stash", "--include-untracked"], timeout=30)
             _append_step({
                 "step": "stash",
                 "success": stash_result["success"],
