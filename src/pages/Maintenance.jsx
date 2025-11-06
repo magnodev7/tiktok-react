@@ -1337,6 +1337,12 @@ export default function Maintenance() {
 
           {/* Atualização do Sistema */}
           <Card title="🔄 Atualizar Sistema (Recomendado)">
+            <div className="mb-4 rounded-lg border border-indigo-400/70 bg-indigo-50 px-4 py-3 text-sm text-indigo-800 shadow-sm dark:border-indigo-300/40 dark:bg-indigo-900/40 dark:text-indigo-100">
+              <p className="font-semibold">Novo fluxo de atualização disponível!</p>
+              <p className="mt-1 text-xs">
+                Selecione abaixo a referência (branch/tag) desejada para atualizar o sistema e confirme para aplicar a nova versão.
+              </p>
+            </div>
             <div className="mb-4">
               <p className="text-gray-600 dark:text-gray-400 mb-3">
                 Atualiza o código do sistema mantendo seus dados:
