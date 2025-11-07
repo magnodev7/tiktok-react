@@ -1,7 +1,7 @@
 import json
 import datetime as dt
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Callable, List, Tuple, Dict
 import sys
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -152,6 +152,25 @@ def _seed_videos(base_dir: Path, schedules: List[str], start_date: dt.datetime, 
     return slot_map
 
 
+def _ordered_slots(sim: SimulatedScheduler) -> List[Tuple[str, dt.datetime]]:
+    candidates = sim._assign_dynamic_slots()
+    assert candidates
+    return sorted(
+        [(Path(dv.path).name, dv.scheduled_at) for dv in candidates],
+        key=lambda item: item[1],
+    )
+
+
+def _all_videos_posted(video_dir: Path) -> bool:
+    for meta_path in video_dir.glob("*.json"):
+        if meta_path.name.endswith(".meta.json"):
+            continue
+        meta = scheduler._read_json(meta_path) or {}
+        if meta.get("status") != "posted":
+            return False
+    return True
+
+
 def test_scheduler_handles_30_days_with_cookie_failure(monkeypatch, scheduler_environment):
     tz = ZoneInfo("America/Sao_Paulo")
     start = dt.datetime(2025, 1, 1, 7, 55, tzinfo=tz)
@@ -281,6 +300,92 @@ def test_scheduler_handles_month_with_daily_cookie_failures(monkeypatch, schedul
     assert sum("Simulando falha de cookies" in entry for entry in logs) == len(fail_names)
 
 
+def test_multiple_accounts_run_in_parallel(monkeypatch, scheduler_environment):
+    tz = ZoneInfo("America/Sao_Paulo")
+    start = dt.datetime(2025, 1, 1, 7, 55, tzinfo=tz)
+    clock = FakeClock(start)
+    monkeypatch.setattr(scheduler, "_now_app", clock.now, raising=False)
+    monkeypatch.setattr(scheduler, "_nowstamp", lambda: clock.now().strftime("%Y%m%d_%H%M%S"), raising=False)
+
+    accounts = ["acc_a", "acc_b", "acc_c"]
+    logs: Dict[str, List[str]] = {acc: [] for acc in accounts}
+    sims: Dict[str, SimulatedScheduler] = {}
+    merged_slots: List[Tuple[dt.datetime, str, str]] = []
+
+    for idx, account in enumerate(accounts):
+        video_dir = scheduler_environment["videos"] / account
+        video_dir.mkdir(parents=True, exist_ok=True)
+        _seed_videos(video_dir, scheduler_environment["schedules"], start_date=start, days=5)
+
+        sim = SimulatedScheduler(account, clock=clock, logger=logs[account].append)
+        sim.scheduler_active = True
+        sims[account] = sim
+
+        for name, when in _ordered_slots(sim):
+            merged_slots.append((when, account, name))
+
+    merged_slots.sort(key=lambda item: item[0])
+
+    for when, account, name in merged_slots:
+        clock.set(when + dt.timedelta(seconds=accounts.index(account) + 1))
+        sims[account].scheduled_posting()
+
+    for account in accounts:
+        expected = [name for _, acc, name in merged_slots if acc == account]
+        posted = [name for _, name in sims[account].posted_order]
+        assert posted == expected
+        video_dir = scheduler_environment["videos"] / account
+        for meta_path in video_dir.glob("*.json"):
+            if meta_path.name.endswith(".meta.json"):
+                continue
+            meta = scheduler._read_json(meta_path) or {}
+            assert meta.get("status") == "posted"
+
+
+def test_scheduler_catches_up_after_prolonged_outage(monkeypatch, scheduler_environment):
+    tz = ZoneInfo("America/Sao_Paulo")
+    start = dt.datetime(2025, 1, 1, 7, 55, tzinfo=tz)
+    clock = FakeClock(start)
+    monkeypatch.setattr(scheduler, "_now_app", clock.now, raising=False)
+    monkeypatch.setattr(scheduler, "_nowstamp", lambda: clock.now().strftime("%Y%m%d_%H%M%S"), raising=False)
+    monkeypatch.setattr(scheduler, "MAX_POSTS_PER_TICK", 0, raising=False)
+
+    account = "outage_account"
+    video_dir = scheduler_environment["videos"] / account
+    video_dir.mkdir(parents=True, exist_ok=True)
+    _seed_videos(video_dir, scheduler_environment["schedules"], start_date=start, days=7)
+
+    sim = SimulatedScheduler(account, clock=clock, logger=lambda msg: None)
+    sim.scheduler_active = True
+    ordered_slots = _ordered_slots(sim)
+
+    outage_end = start + dt.timedelta(days=3)
+    clock.set(outage_end)
+
+    total_expected = len(ordered_slots)
+    iterations = 0
+    max_iterations = total_expected * 3
+    while True:
+        pending_meta = []
+        for meta_path in video_dir.glob("*.json"):
+            if meta_path.name.endswith(".meta.json"):
+                continue
+            meta = scheduler._read_json(meta_path) or {}
+            if meta.get("status") != "posted":
+                when = scheduler._parse_iso_maybe(meta.get("scheduled_at"))
+                if when:
+                    pending_meta.append(when)
+        if not pending_meta:
+            break
+        next_time = max(min(pending_meta), clock.now())
+        clock.set(next_time + dt.timedelta(seconds=5))
+        sim.scheduled_posting()
+        iterations += 1
+        if iterations > max_iterations:
+            break
+
+    assert _all_videos_posted(video_dir)
+    assert len(sim.posted_order) == total_expected
 def test_scheduler_recovers_after_restart(monkeypatch, scheduler_environment):
     tz = ZoneInfo("America/Sao_Paulo")
     start = dt.datetime(2025, 1, 1, 7, 55, tzinfo=tz)
