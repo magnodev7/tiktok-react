@@ -440,6 +440,36 @@ def test_scheduler_catches_up_after_prolonged_outage(monkeypatch, scheduler_envi
 
     assert _all_videos_posted(video_dir)
     assert len(sim.posted_order) == total_expected
+
+
+def test_scheduler_keeps_pending_when_cookies_invalid(monkeypatch, scheduler_environment):
+    tz = ZoneInfo("America/Sao_Paulo")
+    start = dt.datetime(2025, 1, 1, 7, 55, tzinfo=tz)
+    clock = FakeClock(start)
+    monkeypatch.setattr(scheduler, "_now_app", clock.now, raising=False)
+    monkeypatch.setattr(scheduler, "_nowstamp", lambda: clock.now().strftime("%Y%m%d_%H%M%S"), raising=False)
+
+    account = "invalid_cookie_account"
+    video_dir = scheduler_environment["videos"] / account
+    video_dir.mkdir(parents=True, exist_ok=True)
+    _seed_videos(video_dir, scheduler_environment["schedules"], start_date=start, days=1)
+
+    logs: List[str] = []
+    sim = SimulatedScheduler(account, clock=clock, logger=logs.append)
+    sim.scheduler_active = True
+
+    _patch_cookies(monkeypatch, "load_cookies_for_account", lambda driver, acc: False)
+    _patch_cookies(monkeypatch, "cookies_marked_invalid", lambda acc: False)
+    sim.fail_next_login()
+
+    slots = _ordered_slots(sim)
+    clock.set(slots[0][1] + dt.timedelta(seconds=10))
+    sim.scheduled_posting()
+
+    meta_path = Path(slots[0][0]).with_suffix(".json")
+    meta = scheduler._read_json(video_dir / meta_path.name)
+    assert meta and meta.get("status") != "posted"
+    assert any("SOLUÇÃO: Acesse o painel e atualize os cookies" in entry for entry in logs)
 def test_scheduler_recovers_after_restart(monkeypatch, scheduler_environment):
     tz = ZoneInfo("America/Sao_Paulo")
     start = dt.datetime(2025, 1, 1, 7, 55, tzinfo=tz)
