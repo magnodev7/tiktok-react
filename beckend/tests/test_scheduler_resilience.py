@@ -53,8 +53,7 @@ class SimulatedScheduler(scheduler.TikTokScheduler):
             self._last_cookie_failure_time = self._clock.now()
             self.log("🧪 Simulando falha de cookies")
             return False
-        self.log("🧪 Sessão simulada OK")
-        return True
+        return super()._ensure_logged()
 
     def _post_one(self, path: str) -> bool:  # type: ignore[override]
         self.posted_order.append((self._clock.now(), Path(path).name))
@@ -124,6 +123,8 @@ def scheduler_environment(monkeypatch, tmp_path):
     _patch_driver(monkeypatch, "get_fresh_driver", lambda *_, **__: DummyDriver(str(profiles / "default_runtime")))
     _patch_driver(monkeypatch, "is_session_alive", lambda driver: False)
     _patch_driver(monkeypatch, "release_driver_lock", lambda driver: None)
+    _patch_cookies(monkeypatch, "load_cookies_for_account", lambda driver, account: True)
+    _patch_cookies(monkeypatch, "cookies_marked_invalid", lambda account: False)
 
     return {
         "profiles": profiles,
@@ -351,6 +352,19 @@ def test_simultaneous_accounts_same_slot_no_session_conflict(monkeypatch, schedu
     monkeypatch.setattr(scheduler, "_nowstamp", lambda: clock.now().strftime("%Y%m%d_%H%M%S"), raising=False)
 
     accounts = ["acc_one", "acc_two", "acc_three"]
+    driver_registry: Dict[str, List[DummyDriver]] = {acc: [] for acc in accounts}
+
+    def tracked_get_driver(proxy, profile_base_dir, account_name, headless):
+        runtime_dir = scheduler_environment["profiles"] / account_name / "runtime_sim"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        driver = DummyDriver(str(runtime_dir), account=account_name)
+        driver_registry[account_name].append(driver)
+        return driver
+
+    _patch_driver(monkeypatch, "get_fresh_driver", tracked_get_driver)
+    _patch_driver(monkeypatch, "is_session_alive", lambda driver: True)
+    _patch_cookies(monkeypatch, "load_cookies_for_account", lambda driver, account: True)
+    _patch_cookies(monkeypatch, "cookies_marked_invalid", lambda account: False)
 
     sims: Dict[str, SimulatedScheduler] = {}
     shared_slots: Dict[dt.datetime, List[Tuple[str, str]]] = {}
@@ -378,6 +392,8 @@ def test_simultaneous_accounts_same_slot_no_session_conflict(monkeypatch, schedu
         assert _all_videos_posted(video_dir)
     user_dirs = {sim.USER_DATA_DIR for sim in sims.values()}
     assert len(user_dirs) == len(accounts)
+    for account in accounts:
+        assert len(driver_registry[account]) == 1, f"Conta {account} reutilizou múltiplos drivers"
 
 
 def test_scheduler_catches_up_after_prolonged_outage(monkeypatch, scheduler_environment):
