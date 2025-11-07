@@ -456,10 +456,7 @@ class TikTokScheduler:
                     return True
                 last_error = "cookies inválidos"
                 self.log(f"❌ Falha no login com cookies (tentativa {attempt}/{attempt_limit})")
-                # CORREÇÃO: Marca timestamp de falha e para tentativas
-                # Não faz sentido tentar 20x com os mesmos cookies inválidos
-                self._last_cookie_failure_time = _now_app()
-                break
+                ok = False
             except TRANSIENT_DRIVER_ERRORS as e:
                 last_error = e
                 self.log(f"⚠️ Falha na sessão Chrome (tentativa {attempt}/{attempt_limit}): {e}")
