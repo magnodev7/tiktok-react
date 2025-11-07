@@ -223,6 +223,64 @@ def test_scheduler_handles_30_days_with_cookie_failure(monkeypatch, scheduler_en
     assert any("Simulando falha de cookies" in entry for entry in logs)
 
 
+def test_scheduler_handles_month_with_daily_cookie_failures(monkeypatch, scheduler_environment):
+    tz = ZoneInfo("America/Sao_Paulo")
+    start = dt.datetime(2025, 1, 1, 7, 55, tzinfo=tz)
+    clock = FakeClock(start)
+    monkeypatch.setattr(scheduler, "_now_app", clock.now, raising=False)
+    monkeypatch.setattr(scheduler, "_nowstamp", lambda: clock.now().strftime("%Y%m%d_%H%M%S"), raising=False)
+
+    account = "daily_fail"
+    video_dir = scheduler_environment["videos"] / account
+    video_dir.mkdir(parents=True, exist_ok=True)
+    slot_entries = _seed_videos(
+        video_dir,
+        scheduler_environment["schedules"],
+        start_date=start,
+        days=30,
+    )
+
+    logs: List[str] = []
+    sim = SimulatedScheduler(account, clock=clock, logger=logs.append)
+    sim.scheduler_active = True
+
+    candidates = sim._assign_dynamic_slots()
+    assert len(candidates) == len(slot_entries)
+
+    ordered_slots = sorted(
+        ((Path(dv.path).name, dv.scheduled_at) for dv in candidates),
+        key=lambda item: item[1],
+    )
+    fail_names = {
+        name for name, when in ordered_slots if when.strftime("%H:%M") == "16:00"
+    }
+    assert len(fail_names) == 30  # one failure per day
+
+    for name, scheduled_at in ordered_slots:
+        clock.set(scheduled_at + dt.timedelta(seconds=15))
+        if name in fail_names:
+            sim.fail_next_login()
+            sim.scheduled_posting()
+            meta = scheduler._read_json((video_dir / name).with_suffix(".json"))
+            assert meta and meta.get("status") != "posted"
+            clock.advance(dt.timedelta(minutes=5))
+            sim.scheduled_posting()
+        else:
+            sim.scheduled_posting()
+
+    assert len(sim.posted_order) == len(ordered_slots)
+    names_posted = [name for _, name in sim.posted_order]
+    assert names_posted == [name for name, _ in ordered_slots]
+    pending = [
+        meta_path
+        for meta_path in video_dir.glob("*.json")
+        if not meta_path.name.endswith(".meta.json")
+        and (scheduler._read_json(meta_path) or {}).get("status") != "posted"
+    ]
+    assert not pending
+    assert sum("Simulando falha de cookies" in entry for entry in logs) == len(fail_names)
+
+
 def test_scheduler_recovers_after_restart(monkeypatch, scheduler_environment):
     tz = ZoneInfo("America/Sao_Paulo")
     start = dt.datetime(2025, 1, 1, 7, 55, tzinfo=tz)
