@@ -41,6 +41,7 @@ def get_account_name():
 ACCOUNT_NAME = os.getenv("ACCOUNT_NAME") or get_account_name()  # Dinâmico, busca no diretório
 VISIBLE = os.getenv("VISIBLE", "false").lower() in ("1", "true", "yes", "on")
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
+TEMP_PROFILE = os.getenv("TEMP_PROFILE", "false").lower() in ("1", "true", "yes", "on")
 
 def main():
     print(f"🧪 Iniciando teste de cookies para conta: @{ACCOUNT_NAME}")
@@ -56,11 +57,13 @@ def main():
 
     # Cria driver fresco
     print("🔧 Criando driver Chrome...")
+    base_dir = None if (TEMP_PROFILE or TEST_MODE) else scheduler.USER_DATA_DIR
     driver = get_fresh_driver(
         None,
-        profile_base_dir=scheduler.USER_DATA_DIR,
+        profile_base_dir=base_dir,
         account_name=ACCOUNT_NAME,
         headless=not VISIBLE,
+        force_temp_profile=TEMP_PROFILE or TEST_MODE,
     )
 
     try:

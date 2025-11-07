@@ -12,6 +12,8 @@ Mudanças vs driver.py (481 linhas):
 """
 import os
 import tempfile
+import uuid
+from pathlib import Path
 from typing import Optional
 
 from selenium import webdriver
@@ -20,6 +22,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import (
     InvalidSessionIdException,
     WebDriverException,
+    SessionNotCreatedException,
 )
 from webdriver_manager.chrome import ChromeDriverManager
 
@@ -71,7 +74,34 @@ def _build_chrome_options(headless: bool = True) -> Options:
     return opts
 
 
-def build_driver(account_name: Optional[str] = None, profile_base_dir: Optional[str] = None, headless: bool = True) -> webdriver.Chrome:
+def _resolve_profile_dir(
+    profile_base_dir: Optional[str],
+    force_temp: bool = False,
+) -> Path:
+    """
+    Resolve diretório de perfil. Sempre cria diretório exclusivo quando necessário.
+    """
+    if force_temp or not profile_base_dir:
+        temp_profile = Path(tempfile.mkdtemp(prefix="chrome-profile-"))
+        return temp_profile
+
+    base = Path(profile_base_dir)
+    temp_env = os.getenv("TEMP_PROFILE") == "1"
+    if temp_env:
+        runtime = Path(tempfile.mkdtemp(prefix="chrome-runtime-", dir=str(base)))
+        return runtime
+
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def build_driver(
+    account_name: Optional[str] = None,
+    profile_base_dir: Optional[str] = None,
+    headless: bool = True,
+    force_temp_profile: bool = False,
+    use_profile_dir: bool = True,
+) -> webdriver.Chrome:
     """
     Cria driver do Chrome de forma SIMPLES (como tiktok_bot).
 
@@ -84,16 +114,22 @@ def build_driver(account_name: Optional[str] = None, profile_base_dir: Optional[
     Raises:
         Exception: Se falhar ao criar driver
     """
-    # Verifica se é ambiente remoto (Docker com Selenium Grid)
+    profile_dir: Optional[Path] = None
+    if use_profile_dir:
+        profile_dir = _resolve_profile_dir(
+            profile_base_dir,
+            force_temp_profile or _is_remote(),
+        )
+
     if _is_remote():
         hub_url = os.getenv("SELENIUM_HUB_URL", "http://selenium:4444").rstrip("/") + "/wd/hub"
         print(f"🌐 Usando Selenium Grid: {hub_url}")
 
         opts = _build_chrome_options(headless)
 
-        # Profile temporário no remoto
-        temp_profile = f"/tmp/chrome-profile-{os.getpid()}"
-        opts.add_argument(f"--user-data-dir={temp_profile}")
+        if profile_dir:
+            opts.add_argument(f"--user-data-dir={profile_dir}")
+            print(f"📁 Chrome user-data-dir: {profile_dir}")
 
         driver = webdriver.Remote(
             command_executor=hub_url,
@@ -105,9 +141,9 @@ def build_driver(account_name: Optional[str] = None, profile_base_dir: Optional[
 
         opts = _build_chrome_options(headless)
 
-        # Profile temporário (apagado automaticamente)
-        temp_profile = tempfile.mkdtemp(prefix="chrome-profile-")
-        opts.add_argument(f"--user-data-dir={temp_profile}")
+        if profile_dir:
+            opts.add_argument(f"--user-data-dir={profile_dir}")
+            print(f"📁 Chrome user-data-dir: {profile_dir}")
 
         # Usa webdriver-manager para garantir versão compatível
         driver_path = os.getenv("CHROMEDRIVER_PATH")
@@ -199,6 +235,7 @@ def get_fresh_driver(
     profile_base_dir: Optional[str] = None,
     account_name: Optional[str] = None,
     headless: bool = True,
+    force_temp_profile: bool = False,
 ) -> webdriver.Chrome:
     """
     Compatibilidade com código antigo: sempre cria driver novo.
@@ -218,9 +255,28 @@ def get_fresh_driver(
         except:
             pass
 
-    # Cria novo driver
-    return build_driver(
-        account_name=account_name,
-        profile_base_dir=profile_base_dir,
-        headless=headless,
-    )
+    try:
+        return build_driver(
+            account_name=account_name,
+            profile_base_dir=profile_base_dir,
+            headless=headless,
+            force_temp_profile=force_temp_profile,
+            use_profile_dir=not force_temp_profile,
+        )
+    except SessionNotCreatedException as exc:
+        message = str(exc)
+        if "user data directory is already in use" in message.lower():
+            runtime_dir = (
+                Path(profile_base_dir) / "runtime" / f"session-{uuid.uuid4().hex}"
+                if profile_base_dir
+                else None
+            )
+            print("⚠️ Perfil em uso; criando runtime temporário para evitar conflito.")
+            return build_driver(
+                account_name=account_name,
+                profile_base_dir=str(runtime_dir) if runtime_dir else None,
+                headless=headless,
+                force_temp_profile=True,
+                use_profile_dir=False,
+            )
+        raise
