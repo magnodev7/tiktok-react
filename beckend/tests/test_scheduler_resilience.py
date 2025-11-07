@@ -72,10 +72,11 @@ class SimulatedScheduler(scheduler.TikTokScheduler):
 
 
 class DummyDriver:
-    def __init__(self, profile_dir: str):
+    def __init__(self, profile_dir: str, account: str | None = None):
         self._profile_dir = profile_dir
         self._service_pid = 42
         self.current_url = "https://www.tiktok.com/foryou"
+        self.account_name = account
         self.closed = False
 
     def quit(self):
@@ -340,6 +341,43 @@ def test_multiple_accounts_run_in_parallel(monkeypatch, scheduler_environment):
                 continue
             meta = scheduler._read_json(meta_path) or {}
             assert meta.get("status") == "posted"
+
+
+def test_simultaneous_accounts_same_slot_no_session_conflict(monkeypatch, scheduler_environment):
+    tz = ZoneInfo("America/Sao_Paulo")
+    start = dt.datetime(2025, 1, 1, 7, 55, tzinfo=tz)
+    clock = FakeClock(start)
+    monkeypatch.setattr(scheduler, "_now_app", clock.now, raising=False)
+    monkeypatch.setattr(scheduler, "_nowstamp", lambda: clock.now().strftime("%Y%m%d_%H%M%S"), raising=False)
+
+    accounts = ["acc_one", "acc_two", "acc_three"]
+
+    sims: Dict[str, SimulatedScheduler] = {}
+    shared_slots: Dict[dt.datetime, List[Tuple[str, str]]] = {}
+
+    for account in accounts:
+        video_dir = scheduler_environment["videos"] / account
+        video_dir.mkdir(parents=True, exist_ok=True)
+        _seed_videos(video_dir, scheduler_environment["schedules"], start_date=start, days=2)
+        sim = SimulatedScheduler(account, clock=clock, logger=lambda msg: None)
+        sim.scheduler_active = True
+        sims[account] = sim
+        for name, when in _ordered_slots(sim):
+            shared_slots.setdefault(when, []).append((account, name))
+
+    for sim in sims.values():
+        assert sim._ensure_logged()
+
+    for when in sorted(shared_slots.keys()):
+        clock.set(when + dt.timedelta(seconds=1))
+        for account, _ in shared_slots[when]:
+            sims[account].scheduled_posting()
+
+    for account in accounts:
+        video_dir = scheduler_environment["videos"] / account
+        assert _all_videos_posted(video_dir)
+    user_dirs = {sim.USER_DATA_DIR for sim in sims.values()}
+    assert len(user_dirs) == len(accounts)
 
 
 def test_scheduler_catches_up_after_prolonged_outage(monkeypatch, scheduler_environment):
