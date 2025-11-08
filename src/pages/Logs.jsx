@@ -9,6 +9,8 @@ import Spinner from '@/components/common/Spinner';
 import apiClient from '@/api/client';
 
 const ALL_TAB_KEY = '__all__';
+const NO_ACCOUNT_KEY = '__unassigned__';
+const NO_ACCOUNT_LABEL = 'Sistema';
 
 export default function Logs() {
   const [limit, setLimit] = useState(50);
@@ -161,7 +163,7 @@ export default function Logs() {
     if (!filteredLogs.length) return {};
     const grouped = {};
     filteredLogs.forEach((log) => {
-      const key = log.account_name || 'Sem conta';
+      const key = log.account_name || NO_ACCOUNT_KEY;
       if (!grouped[key]) {
         grouped[key] = [];
       }
@@ -170,13 +172,41 @@ export default function Logs() {
     return grouped;
   }, [filteredLogs]);
 
+  const accountOrder = useMemo(() => {
+    const base = accounts?.map((acc) => acc.account_name).filter(Boolean) ?? [];
+    const extras = Object.keys(groupedLogs).filter((name) => {
+      if (!name) {
+        return false;
+      }
+      if (name === NO_ACCOUNT_KEY) {
+        return false;
+      }
+      return !base.includes(name);
+    }).sort((a, b) => a.localeCompare(b));
+
+    const order = [...base, ...extras];
+    if (groupedLogs[NO_ACCOUNT_KEY]) {
+      order.push(NO_ACCOUNT_KEY);
+    }
+    return order;
+  }, [accounts, groupedLogs]);
+
   const groupedEntries = useMemo(() => {
-    return Object.entries(groupedLogs).sort(([, logsA], [, logsB]) => {
-      const dateA = new Date(logsA?.[0]?.created_at || 0);
-      const dateB = new Date(logsB?.[0]?.created_at || 0);
-      return dateB - dateA;
+    const entries = Object.entries(groupedLogs);
+    if (!entries.length) {
+      return [];
+    }
+    const orderMap = new Map(accountOrder.map((name, idx) => [name, idx]));
+    const defaultIndex = accountOrder.length;
+    return entries.sort(([nameA], [nameB]) => {
+      const idxA = orderMap.has(nameA) ? orderMap.get(nameA) : defaultIndex;
+      const idxB = orderMap.has(nameB) ? orderMap.get(nameB) : defaultIndex;
+      if (idxA !== idxB) {
+        return idxA - idxB;
+      }
+      return nameA.localeCompare(nameB);
     });
-  }, [groupedLogs]);
+  }, [groupedLogs, accountOrder]);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -542,7 +572,7 @@ export default function Logs() {
                     <div>
                       <p className="text-xs text-text-tertiary uppercase tracking-wide">Conta</p>
                       <p className="text-lg font-semibold text-text-primary">
-                        {accountName === 'Sem conta' ? 'Sem conta' : `@${accountName}`}
+                        {accountName === NO_ACCOUNT_KEY ? NO_ACCOUNT_LABEL : `@${accountName}`}
                       </p>
                     </div>
                     <Badge variant="info" dot>{accountLogs.length}</Badge>
