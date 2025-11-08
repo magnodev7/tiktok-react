@@ -1,5 +1,5 @@
-import { FileText, Search, RefreshCw, Filter, AlertCircle, Info, AlertTriangle, XCircle, Pause, Play, Clock, Trash2 } from 'lucide-react';
-import { useState } from 'react';
+import { FileText, Search, RefreshCw, Info, AlertTriangle, XCircle, Pause, Play, Clock, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import Card from '@/components/common/Card';
 import Badge from '@/components/common/Badge';
@@ -8,6 +8,8 @@ import { useAccounts } from '@/hooks/useAccounts';
 import Spinner from '@/components/common/Spinner';
 import apiClient from '@/api/client';
 
+const ALL_TAB_KEY = '__all__';
+
 export default function Logs() {
   const [limit, setLimit] = useState(50);
   const [selectedAccount, setSelectedAccount] = useState(null);
@@ -15,6 +17,7 @@ export default function Logs() {
   const [searchTerm, setSearchTerm] = useState('');
   const [isPaused, setIsPaused] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [accountCounts, setAccountCounts] = useState({});
 
   const queryClient = useQueryClient();
   const { data: logs, isLoading, refetch, dataUpdatedAt } = useLogs(limit, selectedAccount, !isPaused);
@@ -33,6 +36,147 @@ export default function Logs() {
       queryClient.invalidateQueries({ queryKey: ['logs'], exact: false });
     },
   });
+
+  const filteredLogs = useMemo(() => {
+    if (!logs) return [];
+    return logs
+      .filter((log) => {
+        if (levelFilter !== 'all' && log.level?.toLowerCase() !== levelFilter) {
+          return false;
+        }
+        if (searchTerm) {
+          const searchLower = searchTerm.toLowerCase();
+          return (
+            log.message?.toLowerCase().includes(searchLower) ||
+            log.account_name?.toLowerCase().includes(searchLower) ||
+            log.module?.toLowerCase().includes(searchLower)
+          );
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        const dateA = new Date(a.created_at || 0);
+        const dateB = new Date(b.created_at || 0);
+        return dateB - dateA;
+      });
+  }, [logs, levelFilter, searchTerm]);
+
+  useEffect(() => {
+    if (!filteredLogs.length && selectedAccount) {
+      setAccountCounts((prev) => {
+        if (prev[selectedAccount] === 0) {
+          return prev;
+        }
+        return { ...prev, [selectedAccount]: 0 };
+      });
+      return;
+    }
+
+    if (!filteredLogs.length) {
+      setAccountCounts((prev) => {
+        if (prev[ALL_TAB_KEY] === 0) {
+          return prev;
+        }
+        return { ...prev, [ALL_TAB_KEY]: 0 };
+      });
+      return;
+    }
+
+    setAccountCounts((prev) => {
+      const next = { ...prev };
+      let changed = false;
+
+      if (!selectedAccount) {
+        const counts = {};
+        filteredLogs.forEach((log) => {
+          if (log.account_name) {
+            counts[log.account_name] = (counts[log.account_name] || 0) + 1;
+          }
+        });
+        counts[ALL_TAB_KEY] = filteredLogs.length;
+        Object.entries(counts).forEach(([key, value]) => {
+          if (next[key] !== value) {
+            next[key] = value;
+            changed = true;
+          }
+        });
+      } else if (next[selectedAccount] !== filteredLogs.length) {
+        next[selectedAccount] = filteredLogs.length;
+        changed = true;
+      }
+
+      return changed ? next : prev;
+    });
+  }, [filteredLogs, selectedAccount]);
+
+  const accountTabs = useMemo(() => {
+    const seen = new Set();
+    const names = [];
+
+    if (accounts?.length) {
+      accounts
+        .map((acc) => acc.account_name)
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b))
+        .forEach((name) => {
+          if (!seen.has(name)) {
+            seen.add(name);
+            names.push(name);
+          }
+        });
+    }
+
+    if (filteredLogs.length) {
+      filteredLogs
+        .map((log) => log.account_name)
+        .filter(Boolean)
+        .forEach((name) => {
+          if (!seen.has(name)) {
+            seen.add(name);
+            names.push(name);
+          }
+        });
+    }
+
+    if (selectedAccount && !seen.has(selectedAccount)) {
+      seen.add(selectedAccount);
+      names.push(selectedAccount);
+    }
+
+    return [
+      {
+        value: null,
+        label: 'Todas',
+        count: accountCounts[ALL_TAB_KEY] ?? filteredLogs.length ?? 0,
+      },
+      ...names.map((name) => ({
+        value: name,
+        label: name,
+        count: accountCounts[name],
+      })),
+    ];
+  }, [accounts, filteredLogs, selectedAccount, accountCounts]);
+
+  const groupedLogs = useMemo(() => {
+    if (!filteredLogs.length) return {};
+    const grouped = {};
+    filteredLogs.forEach((log) => {
+      const key = log.account_name || 'Sem conta';
+      if (!grouped[key]) {
+        grouped[key] = [];
+      }
+      grouped[key].push(log);
+    });
+    return grouped;
+  }, [filteredLogs]);
+
+  const groupedEntries = useMemo(() => {
+    return Object.entries(groupedLogs).sort(([, logsA], [, logsB]) => {
+      const dateA = new Date(logsA?.[0]?.created_at || 0);
+      const dateB = new Date(logsB?.[0]?.created_at || 0);
+      return dateB - dateA;
+    });
+  }, [groupedLogs]);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -103,35 +247,74 @@ export default function Logs() {
     }
   };
 
-  const filteredLogs = logs?.filter(log => {
-    // Filtro por nível
-    if (levelFilter !== 'all' && log.level?.toLowerCase() !== levelFilter) {
-      return false;
-    }
-
-    // Filtro por busca
-    if (searchTerm) {
-      const searchLower = searchTerm.toLowerCase();
-      return (
-        log.message?.toLowerCase().includes(searchLower) ||
-        log.account_name?.toLowerCase().includes(searchLower) ||
-        log.module?.toLowerCase().includes(searchLower)
-      );
-    }
-
-    return true;
-  })?.sort((a, b) => {
-    // Ordena do mais recente (topo) para o mais antigo (baixo)
-    const dateA = new Date(a.created_at || 0);
-    const dateB = new Date(b.created_at || 0);
-    return dateB - dateA;
-  });
-
   const levelCounts = logs?.reduce((acc, log) => {
     const level = log.level?.toLowerCase() || 'debug';
     acc[level] = (acc[level] || 0) + 1;
     return acc;
   }, {}) || {};
+
+  const renderLogItem = (log, index, { hideAccountTag = false } = {}) => {
+    const key = log.id || `${log.account_name || 'log'}-${log.created_at || index}-${index}`;
+    const isRecent = log.created_at && (new Date() - new Date(log.created_at)) < 10000;
+    const isCritical = log.level?.toLowerCase() === 'error' || log.level?.toLowerCase() === 'critical';
+    return (
+      <div
+        key={key}
+        className={`flex items-start gap-3 p-4 rounded-lg transition-all duration-300 ${
+          isCritical
+            ? 'bg-red-500/10 border border-red-500/30 hover:bg-red-500/15'
+            : 'bg-background hover:bg-background-elevated border border-border/40'
+        } ${isRecent ? 'animate-fade-in' : ''}`}
+      >
+        <div className="flex-shrink-0 mt-1">
+          {getLevelIcon(log.level)}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-start justify-between gap-3 mb-2">
+            <p className={`text-sm font-medium break-words ${
+              isCritical ? 'text-red-400' : 'text-text-primary'
+            }`}>
+              {log.message}
+            </p>
+            <Badge variant={getLevelBadgeVariant(log.level)} className="flex-shrink-0">
+              {log.level || 'DEBUG'}
+            </Badge>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            <span className="flex items-center gap-1.5 text-text-tertiary font-medium">
+              <Clock className="w-3 h-3" />
+              {getRelativeTime(log.created_at)}
+            </span>
+            {!hideAccountTag && log.account_name && (
+              <span className="flex items-center gap-1.5 text-accent">
+                <span className="w-1 h-1 rounded-full bg-accent"></span>
+                @{log.account_name}
+              </span>
+            )}
+            {log.module && (
+              <span className="flex items-center gap-1.5 text-text-secondary bg-background-elevated px-2 py-0.5 rounded">
+                <span className="w-1 h-1 rounded-full bg-text-secondary"></span>
+                {log.module}
+              </span>
+            )}
+            <span className="text-text-tertiary/60 ml-auto" title="Data e hora exata">
+              {log.created_at
+                ? new Date(log.created_at).toLocaleString('pt-BR', {
+                    day: '2-digit',
+                    month: '2-digit',
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                  })
+                : '---'
+              }
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   if (isLoading) {
     return (
@@ -203,6 +386,49 @@ export default function Logs() {
         </Card>
       </div>
 
+      {/* Account Tabs */}
+      <Card>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <p className="text-sm text-text-secondary">Visualizar por conta</p>
+              <p className="text-lg font-semibold text-text-primary">Navegue pelas contas em abas</p>
+            </div>
+            <span className="text-xs text-text-tertiary">
+              {selectedAccount ? `Mostrando @${selectedAccount}` : 'Exibindo todas as contas'}
+            </span>
+          </div>
+          <div className="-mx-2 overflow-x-auto px-2">
+            <div className="flex gap-2 min-w-full">
+              {accountTabs.map((tab) => {
+                const isActive = tab.value === selectedAccount;
+                const countLabel = typeof tab.count === 'number' ? tab.count : '—';
+                return (
+                  <button
+                    type="button"
+                    key={tab.label}
+                    onClick={() => setSelectedAccount(tab.value)}
+                    aria-pressed={isActive}
+                    className={`
+                      flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-medium transition-all
+                      whitespace-nowrap
+                      ${isActive
+                        ? 'bg-accent/15 text-text-primary border-accent/40 font-semibold'
+                        : 'bg-background-subtle text-text-primary border-border hover:border-accent/60 hover:text-accent'}
+                    `}
+                  >
+                    <span className="truncate">{tab.label}</span>
+                    <Badge variant={isActive ? 'info' : 'neutral'} dot>
+                      {countLabel}
+                    </Badge>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </Card>
+
       {/* Filters */}
       <Card>
         <div className="flex flex-wrap items-center gap-4">
@@ -219,20 +445,6 @@ export default function Logs() {
               />
             </div>
           </div>
-
-          {/* Account Filter */}
-          <select
-            value={selectedAccount || ''}
-            onChange={(e) => setSelectedAccount(e.target.value || null)}
-            className="h-10 px-4 bg-background border border-border rounded-lg text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-          >
-            <option value="">Todas as contas</option>
-            {accounts?.map((account) => (
-              <option key={account.id} value={account.account_name}>
-                {account.account_name}
-              </option>
-            ))}
-          </select>
 
           {/* Level Filter */}
           <select
@@ -315,81 +527,35 @@ export default function Logs() {
         </div>
 
         {filteredLogs && filteredLogs.length > 0 ? (
-          <div className="space-y-2 max-h-[600px] overflow-y-auto pr-2">
-            {filteredLogs.map((log, index) => {
-              const isRecent = log.created_at && (new Date() - new Date(log.created_at)) < 10000; // últimos 10s
-              const isCritical = log.level?.toLowerCase() === 'error' || log.level?.toLowerCase() === 'critical';
-
-              return (
+          selectedAccount ? (
+            <div className="space-y-2 max-h-[600px] overflow-y-auto pr-2">
+              {filteredLogs.map((log, index) => renderLogItem(log, index))}
+            </div>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {groupedEntries.map(([accountName, accountLogs]) => (
                 <div
-                  key={log.id || index}
-                  className={`flex items-start gap-3 p-4 rounded-lg transition-all duration-300 ${
-                    isCritical
-                      ? 'bg-red-500/10 border border-red-500/30 hover:bg-red-500/15'
-                      : 'bg-background hover:bg-background-elevated'
-                  } ${isRecent ? 'animate-fade-in' : ''}`}
+                  key={accountName}
+                  className="bg-background-subtle border border-border rounded-xl p-4 flex flex-col max-h-[600px]"
                 >
-                  {/* Icon */}
-                  <div className="flex-shrink-0 mt-1">
-                    {getLevelIcon(log.level)}
-                  </div>
-
-                  {/* Content */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-start justify-between gap-3 mb-2">
-                      <p className={`text-sm font-medium break-words ${
-                        isCritical ? 'text-red-400' : 'text-text-primary'
-                      }`}>
-                        {log.message}
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <p className="text-xs text-text-tertiary uppercase tracking-wide">Conta</p>
+                      <p className="text-lg font-semibold text-text-primary">
+                        {accountName === 'Sem conta' ? 'Sem conta' : `@${accountName}`}
                       </p>
-                      <Badge variant={getLevelBadgeVariant(log.level)} className="flex-shrink-0">
-                        {log.level || 'DEBUG'}
-                      </Badge>
                     </div>
-
-                    <div className="flex flex-wrap items-center gap-3 text-xs">
-                      {/* Timestamp relativo */}
-                      <span className="flex items-center gap-1.5 text-text-tertiary font-medium">
-                        <Clock className="w-3 h-3" />
-                        {getRelativeTime(log.created_at)}
-                      </span>
-
-                      {/* Conta */}
-                      {log.account_name && (
-                        <span className="flex items-center gap-1.5 text-accent">
-                          <span className="w-1 h-1 rounded-full bg-accent"></span>
-                          @{log.account_name}
-                        </span>
-                      )}
-
-                      {/* Módulo */}
-                      {log.module && (
-                        <span className="flex items-center gap-1.5 text-text-secondary bg-background-elevated px-2 py-0.5 rounded">
-                          <span className="w-1 h-1 rounded-full bg-text-secondary"></span>
-                          {log.module}
-                        </span>
-                      )}
-
-                      {/* Timestamp exato (tooltip) */}
-                      <span className="text-text-tertiary/60 ml-auto" title="Data e hora exata">
-                        {log.created_at
-                          ? new Date(log.created_at).toLocaleString('pt-BR', {
-                              day: '2-digit',
-                              month: '2-digit',
-                              year: 'numeric',
-                              hour: '2-digit',
-                              minute: '2-digit',
-                              second: '2-digit'
-                            })
-                          : '---'
-                        }
-                      </span>
-                    </div>
+                    <Badge variant="info" dot>{accountLogs.length}</Badge>
+                  </div>
+                  <div className="space-y-2 overflow-y-auto pr-1">
+                    {accountLogs.slice(0, 10).map((log, index) =>
+                      renderLogItem(log, index, { hideAccountTag: true })
+                    )}
                   </div>
                 </div>
-              );
-            })}
-          </div>
+              ))}
+            </div>
+          )
         ) : (
           <div className="text-center py-12 text-text-tertiary">
             <FileText className="w-16 h-16 mx-auto mb-4 opacity-50" />
